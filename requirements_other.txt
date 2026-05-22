@@ -1,0 +1,4 @@
+draccus
+lerobot
+pyserial
+feetech-servo-sdk==1.0.0

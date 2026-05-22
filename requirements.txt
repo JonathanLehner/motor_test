@@ -1,0 +1,8 @@
+numpy>=2.0.1
+pyserial>=3.5
+lerobot
+feetech-servo-sdk==1.0.0
+
+# Nova5Gripper imports `dobot_api`, which is usually provided by Dobot's
+# official SDK rather than a standard PyPI package. Install/copy that SDK
+# separately if running with `--gripper nova5`.
