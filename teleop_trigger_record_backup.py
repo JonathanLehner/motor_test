@@ -37,6 +37,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -63,6 +64,9 @@ DEFAULT_TASK    = "teleop recording"
 CHUNKS_SIZE     = 1000
 VIDEO_CODEC     = "libx264"
 VIDEO_CRF       = "18"
+CODEBASE_VERSION = "v3.0"
+DATA_FILE_SIZE_IN_MB = 100
+VIDEO_FILE_SIZE_IN_MB = 200
 
 
 # ── Frame container ────────────────────────────────────────────────────────────
@@ -156,12 +160,28 @@ class CameraCapture:
 
         for cid in cam_ids:
             cap = cv2.VideoCapture(cid)
+            # MJPEG first: most USB webcams only deliver high fps in MJPEG; the
+            # default (raw YUYV) is bandwidth-limited and silently caps to ~10fps,
+            # especially with two cameras. Set fourcc *before* size/fps.
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             cap.set(cv2.CAP_PROP_FPS, fps)
             if not cap.isOpened():
                 raise RuntimeError(f"Cannot open camera {cid}")
             self._caps.append(cap)
+
+        # cap.set(...) is only a *request*; many webcams ignore it. Read back the
+        # ACTUAL frame size — ours delivered 640x240 while we asked for 640x480,
+        # so ffmpeg (told 640x480) packed two captures into one frame. Use the
+        # real size everywhere so frames are never mis-framed/stacked.
+        self.width, self.height = width, height
+        ok, probe = self._caps[0].read()
+        if ok and probe is not None:
+            self.height, self.width = int(probe.shape[0]), int(probe.shape[1])
+            if (self.width, self.height) != (width, height):
+                print(f"[camera] requested {width}x{height}, camera delivers "
+                      f"{self.width}x{self.height} — using actual resolution.")
 
         self._thread = threading.Thread(target=self._run, daemon=True, name="capture")
 
@@ -212,6 +232,7 @@ class CameraCapture:
 class VideoWriter:
     def __init__(self, path: Path, width: int, height: int, fps: int) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._w, self._h = width, height
         self._proc = subprocess.Popen(
             [
                 "ffmpeg", "-y",
@@ -232,12 +253,32 @@ class VideoWriter:
 
     def write(self, frame: np.ndarray) -> None:
         assert self._proc.stdin is not None
-        self._proc.stdin.write(frame.tobytes())
+        # Guarantee exactly width*height*3 bytes per frame. If the camera ignored
+        # the requested resolution, an off-size frame would mis-frame ffmpeg's
+        # raw stream and change the output frame count (this is what produced
+        # the old 2:1 data/video mismatch). Resize defensively.
+        if frame.shape[1] != self._w or frame.shape[0] != self._h:
+            frame = cv2.resize(frame, (self._w, self._h))
+        if frame.dtype != np.uint8:
+            frame = frame.astype(np.uint8)
+        self._proc.stdin.write(np.ascontiguousarray(frame).tobytes())
 
     def close(self) -> None:
         assert self._proc.stdin is not None
         self._proc.stdin.close()
         self._proc.wait()
+
+
+def _video_nbframes(path: Path) -> int:
+    """Count encoded frames so we can assert video frames == data rows."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+             "-show_entries", "stream=nb_read_frames", "-of", "default=nw=1:nk=1", str(path)],
+            check=True, capture_output=True, text=True).stdout.strip()
+        return int(out) if out.isdigit() else -1
+    except Exception:
+        return -1
 
 
 # ── Episode accumulator ────────────────────────────────────────────────────────
@@ -268,13 +309,14 @@ class EpisodeBuffer:
 
 class LeRobotDatasetWriter:
     """
-    Writes a LeRobot-compatible dataset (codebase_version v2.1) incrementally.
+    Writes a LeRobot-compatible dataset (codebase_version v3.0) incrementally.
 
     Layout:
         <root>/
-          meta/info.json  episodes.jsonl  tasks.jsonl
-          data/chunk-000/episode_000000.parquet
-          videos/chunk-000/<cam_key>/episode_000000.mp4
+          meta/info.json  stats.json  tasks.parquet
+          meta/episodes/chunk-000/file-000.parquet
+          data/chunk-000/file-000.parquet
+          videos/<cam_key>/chunk-000/file-000.mp4
     """
 
     def __init__(self, root: Path, cam_keys: list[str], fps: int,
@@ -294,14 +336,16 @@ class LeRobotDatasetWriter:
         self.total_frames   = 0
         self._episodes_meta: list[dict] = []
 
-        for sub in ("meta", "data", "videos"):
+        for sub in ("meta", "data", "videos", "meta/episodes"):
             (root / sub).mkdir(parents=True, exist_ok=True)
 
-        tasks_path = root / "meta" / "tasks.jsonl"
+        tasks_path = root / "meta" / "tasks.parquet"
         if not tasks_path.exists():
-            with open(tasks_path, "w") as f:
-                json.dump({"task_index": 0, "task": task}, f)
-                f.write("\n")
+            tasks = pd.DataFrame(
+                {"task_index": [0]},
+                index=pd.Index([task], name="task"),
+            )
+            tasks.to_parquet(tasks_path)
 
     def save_episode(self, frames: list[Frame], duration: float) -> None:
         if not frames:
@@ -318,7 +362,11 @@ class LeRobotDatasetWriter:
         parquet_dir.mkdir(parents=True, exist_ok=True)
 
         cols: dict = {
-            "timestamp":     pa.array([f.timestamp - t0 for f in frames], pa.float32()),
+            # Exact 1/fps grid — LeRobot requires consecutive timestamps to be
+            # 1/fps apart (±1e-4s). Wall-clock timestamps (jittery) fail this and
+            # block loading/training. Frames are sampled at a fixed fps cadence
+            # (see run()), so the grid matches real elapsed time.
+            "timestamp":     pa.array([i / float(self.fps) for i in range(n)], pa.float32()),
             "frame_index":   pa.array(range(n),                           pa.int64()),
             "episode_index": pa.array([ep_idx] * n,                       pa.int64()),
             "index":         pa.array(range(self.total_frames,
@@ -327,28 +375,46 @@ class LeRobotDatasetWriter:
             "next.done":     pa.array([False] * (n - 1) + [True],         pa.bool_()),
         }
         if self.has_trigger:
-            cols["action"] = pa.array(
-                [[f.action] for f in frames],
-                pa.list_(pa.float32()),
-            )
+            # action has shape [1] -> LeRobot maps it to a scalar Value, so store
+            # a flat float32 (NOT a list<float>, which fails the arrow cast).
+            cols["action"] = pa.array([f.action for f in frames], pa.float32())
 
         pq.write_table(pa.table(cols),
-                       parquet_dir / f"episode_{ep_idx:06d}.parquet")
+                       parquet_dir / f"file-{ep_idx % self.chunks_size:03d}.parquet")
 
         # ── Videos ────────────────────────────────────────────────────────────
+        video_meta = {}
+        from_timestamp = 0.0
+        to_timestamp = n / float(self.fps)
         for cam_idx, cam_key in enumerate(self.cam_keys):
-            vid_dir  = self.root / "videos" / f"chunk-{chunk:03d}" / cam_key
-            vid_path = vid_dir / f"episode_{ep_idx:06d}.mp4"
+            vid_dir  = self.root / "videos" / cam_key / f"chunk-{chunk:03d}"
+            vid_path = vid_dir / f"file-{ep_idx % self.chunks_size:03d}.mp4"
             writer   = VideoWriter(vid_path, self.width, self.height, self.fps)
             for f in frames:
                 writer.write(f.images[cam_idx])
             writer.close()
+            nb = _video_nbframes(vid_path)
+            if nb != n:
+                print(f"[dataset] WARNING: {cam_key} ep{ep_idx} encoded {nb} frames "
+                      f"but data has {n} rows — video/data MISALIGNED (not trainable). "
+                      f"Check camera resolution/encoding.")
+            video_meta.update({
+                f"videos/{cam_key}/chunk_index": chunk,
+                f"videos/{cam_key}/file_index": ep_idx % self.chunks_size,
+                f"videos/{cam_key}/from_timestamp": from_timestamp,
+                f"videos/{cam_key}/to_timestamp": to_timestamp,
+            })
 
         # ── Metadata ──────────────────────────────────────────────────────────
         self._episodes_meta.append({
             "episode_index": ep_idx,
             "tasks":  [self.task],
             "length": n,
+            "dataset_from_index": self.total_frames,
+            "dataset_to_index": self.total_frames + n,
+            "data/chunk_index": chunk,
+            "data/file_index": ep_idx % self.chunks_size,
+            **video_meta,
         })
         self.total_frames   += n
         self.total_episodes += 1
@@ -356,11 +422,47 @@ class LeRobotDatasetWriter:
         print(f"[dataset] Saved episode {ep_idx}  ({n} frames  {duration:.1f}s)")
 
     def _flush_meta(self) -> None:
-        ep_path = self.root / "meta" / "episodes.jsonl"
-        with open(ep_path, "w") as f:
-            for ep in self._episodes_meta:
-                json.dump(ep, f)
-                f.write("\n")
+        episodes_dir = self.root / "meta" / "episodes" / "chunk-000"
+        episodes_dir.mkdir(parents=True, exist_ok=True)
+        if self._episodes_meta:
+            pq.write_table(pa.table({
+                "episode_index": pa.array(
+                    [ep["episode_index"] for ep in self._episodes_meta],
+                    pa.int64(),
+                ),
+                "tasks": pa.array(
+                    [ep["tasks"] for ep in self._episodes_meta],
+                    pa.list_(pa.string()),
+                ),
+                "length": pa.array(
+                    [ep["length"] for ep in self._episodes_meta],
+                    pa.int64(),
+                ),
+                "dataset_from_index": pa.array(
+                    [ep["dataset_from_index"] for ep in self._episodes_meta],
+                    pa.int64(),
+                ),
+                "dataset_to_index": pa.array(
+                    [ep["dataset_to_index"] for ep in self._episodes_meta],
+                    pa.int64(),
+                ),
+                "data/chunk_index": pa.array(
+                    [ep["data/chunk_index"] for ep in self._episodes_meta],
+                    pa.int64(),
+                ),
+                "data/file_index": pa.array(
+                    [ep["data/file_index"] for ep in self._episodes_meta],
+                    pa.int64(),
+                ),
+                **{
+                    f"videos/{key}/{field}": pa.array(
+                        [ep[f"videos/{key}/{field}"] for ep in self._episodes_meta],
+                        pa.float64() if field.endswith("timestamp") else pa.int64(),
+                    )
+                    for key in self.cam_keys
+                    for field in ("chunk_index", "file_index", "from_timestamp", "to_timestamp")
+                },
+            }), episodes_dir / "file-000.parquet")
 
         features: dict = {
             "timestamp":     {"dtype": "float32", "shape": [1], "names": None},
@@ -381,7 +483,7 @@ class LeRobotDatasetWriter:
                 "dtype": "video",
                 "shape": [self.height, self.width, 3],
                 "names": ["height", "width", "channel"],
-                "video_info": {
+                "info": {
                     "video.fps":            float(self.fps),
                     "video.codec":          "h264",
                     "video.pix_fmt":        "yuv420p",
@@ -390,25 +492,25 @@ class LeRobotDatasetWriter:
                 },
             }
 
-        n_chunks = max(1, (self.total_episodes + self.chunks_size - 1)
-                       // self.chunks_size) if self.total_episodes else 1
         info = {
-            "codebase_version": "v2.1",
+            "codebase_version": CODEBASE_VERSION,
             "robot_type":       "unknown",
             "total_episodes":   self.total_episodes,
             "total_frames":     self.total_frames,
             "total_tasks":      1,
-            "total_videos":     self.total_episodes * len(self.cam_keys),
-            "total_chunks":     n_chunks,
             "chunks_size":      self.chunks_size,
+            "data_files_size_in_mb": DATA_FILE_SIZE_IN_MB,
+            "video_files_size_in_mb": VIDEO_FILE_SIZE_IN_MB,
             "fps":              self.fps,
             "splits":           {"train": f"0:{self.total_episodes}"},
-            "data_path":  "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-            "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+            "data_path":  "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+            "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
             "features":   features,
         }
         with open(self.root / "meta" / "info.json", "w") as f:
             json.dump(info, f, indent=2)
+        with open(self.root / "meta" / "stats.json", "w") as f:
+            json.dump({}, f, indent=2)
 
 
 # ── Display helpers ────────────────────────────────────────────────────────────
@@ -483,6 +585,9 @@ def run(
     has_trigger = trigger_thread is not None
 
     capture = CameraCapture(cam_ids, fps, width, height, trigger_thread)
+    # Use the camera's ACTUAL resolution (capture may have corrected it) so the
+    # video encoder and metadata agree with the real frames.
+    width, height = capture.width, capture.height
     dataset = LeRobotDatasetWriter(output, cam_keys, fps, width, height,
                                    has_trigger=has_trigger, task=task)
 
@@ -498,17 +603,17 @@ def run(
     print("Controls: [R] record  [S] stop/save  [D] discard  [Q] quit")
 
     episode:        Optional[EpisodeBuffer] = None
-    last_frame_ts:  float = 0.0
+    next_sample:    float = 0.0
     saving_threads: list[threading.Thread] = []
 
     def _handle_key(key: int) -> bool:
-        nonlocal episode, last_frame_ts
+        nonlocal episode, next_sample
         if key == ord('q'):
             return True
         elif key == ord('r'):
             if episode is None:
                 episode       = EpisodeBuffer()
-                last_frame_ts = 0.0
+                next_sample   = time.perf_counter()
                 print(f"[rec] Started episode {dataset.total_episodes}")
             else:
                 print("[rec] Already recording — press S to stop first")
@@ -540,9 +645,15 @@ def run(
                 time.sleep(0.005)
                 continue
 
-            if episode is not None and frame.timestamp > last_frame_ts:
-                episode.add(frame)
-                last_frame_ts = frame.timestamp
+            # Sample at a fixed 1/fps cadence (not "every new camera frame"), so
+            # the episode has exactly fps*duration frames on an even grid. If the
+            # camera is slower than fps the latest frame repeats — harmless, and
+            # keeps data rows == video frames == grid timestamps.
+            if episode is not None:
+                now = time.perf_counter()
+                while now >= next_sample:
+                    episode.add(frame)
+                    next_sample += 1.0 / fps
 
             if has_display:
                 rec       = episode is not None
