@@ -67,6 +67,7 @@ VIDEO_CRF       = "18"
 CODEBASE_VERSION = "v3.0"
 DATA_FILE_SIZE_IN_MB = 100
 VIDEO_FILE_SIZE_IN_MB = 200
+DEFAULT_CAMERA_FOURCC = "YUYV"
 
 
 # ── Frame container ────────────────────────────────────────────────────────────
@@ -150,23 +151,28 @@ class CameraCapture:
     """Reads all cameras in a background thread; snapshots trigger action per frame."""
 
     def __init__(self, cam_ids: list[int], fps: int, width: int, height: int,
-                 trigger: Optional[TriggerGripperThread] = None) -> None:
+                 trigger: Optional[TriggerGripperThread] = None,
+                 fourcc: str = DEFAULT_CAMERA_FOURCC) -> None:
         self._interval = 1.0 / fps
         self._trigger  = trigger
         self._lock     = threading.Lock()
         self._latest: Optional[Frame] = None
         self._running  = False
         self._caps: list[cv2.VideoCapture] = []
+        self._bad_frame_warnings = 0
 
         for cid in cam_ids:
             cap = cv2.VideoCapture(cid)
-            # MJPEG first: most USB webcams only deliver high fps in MJPEG; the
-            # default (raw YUYV) is bandwidth-limited and silently caps to ~10fps,
-            # especially with two cameras. Set fourcc *before* size/fps.
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            # Prefer uncompressed YUYV by default. Some UVC cameras produce
+            # intermittent corrupt MJPEG frames, which OpenCV reports as
+            # "Corrupt JPEG data..." and may return as damaged frames.
+            # MJPG remains available via --camera-fourcc when bandwidth requires it.
+            if fourcc.lower() != "default":
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc.upper()))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             cap.set(cv2.CAP_PROP_FPS, fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if not cap.isOpened():
                 raise RuntimeError(f"Cannot open camera {cid}")
             self._caps.append(cap)
@@ -212,7 +218,10 @@ class CameraCapture:
             ok = True
             for cap in self._caps:
                 ret, frame = cap.read()
-                if not ret:
+                if not ret or frame is None or frame.size == 0:
+                    ok = False
+                    break
+                if frame.ndim != 3 or frame.shape[2] != 3:
                     ok = False
                     break
                 images.append(frame)
@@ -580,11 +589,13 @@ def run(
     output: Path,
     task: str,
     trigger_thread: Optional[TriggerGripperThread],
+    camera_fourcc: str = DEFAULT_CAMERA_FOURCC,
 ) -> None:
     cam_keys    = [f"observation.images.cam_{i}" for i in range(len(cam_ids))]
     has_trigger = trigger_thread is not None
 
-    capture = CameraCapture(cam_ids, fps, width, height, trigger_thread)
+    capture = CameraCapture(cam_ids, fps, width, height, trigger_thread,
+                            fourcc=camera_fourcc)
     # Use the camera's ACTUAL resolution (capture may have corrected it) so the
     # video encoder and metadata agree with the real frames.
     width, height = capture.width, capture.height
@@ -716,6 +727,9 @@ def main() -> None:
     p.add_argument("--fps",    type=int,  default=DEFAULT_FPS)
     p.add_argument("--width",  type=int,  default=DEFAULT_WIDTH)
     p.add_argument("--height", type=int,  default=DEFAULT_HEIGHT)
+    p.add_argument("--camera-fourcc", choices=["yuyv", "mjpg", "default"],
+                   default=DEFAULT_CAMERA_FOURCC.lower(),
+                   help="Camera capture format. yuyv avoids corrupt MJPEG frames; mjpg may allow higher resolutions/fps.")
     p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("--task",   type=str,  default=DEFAULT_TASK)
 
@@ -743,6 +757,10 @@ def main() -> None:
     p.add_argument("--master-id",     type=lambda x: int(x, 0), default=0x11)
     p.add_argument("--gripper-open",   type=float, default=1.047)
     p.add_argument("--gripper-closed", type=float, default=0.0)
+    p.add_argument("--gripper-kp", type=float, default=10.0,
+                   help="DM4310 MIT position gain (default: 10.0)")
+    p.add_argument("--gripper-kd", type=float, default=0.5,
+                   help="DM4310 MIT velocity damping gain (default: 0.5)")
     p.add_argument("--gripper-max-vel", type=float, default=1.5)
 
     args = p.parse_args()
@@ -769,6 +787,7 @@ def main() -> None:
                 port=args.can_port, baud=args.can_baud,
                 can_id=args.can_id, master_id=args.master_id,
                 open_pos=args.gripper_open, closed_pos=args.gripper_closed,
+                kp=args.gripper_kp, kd=args.gripper_kd,
                 max_vel=args.gripper_max_vel, rate_hz=args.rate,
             )
 
@@ -787,6 +806,7 @@ def main() -> None:
         output=args.output,
         task=args.task,
         trigger_thread=trigger_thread,
+        camera_fourcc=args.camera_fourcc,
     )
 
 

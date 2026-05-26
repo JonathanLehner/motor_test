@@ -502,6 +502,8 @@ def build_gripper(args) -> GripperController:
             master_id=args.master_id,
             open_pos=args.gripper_open,
             closed_pos=args.gripper_closed,
+            kp=args.gripper_kp,
+            kd=args.gripper_kd,
             max_vel=args.gripper_max_vel,
             rate_hz=args.rate,
         )
@@ -525,6 +527,10 @@ def main() -> None:
                    help="Motor position (rad) when gripper is fully open (default: 60deg from zero)")
     p.add_argument("--gripper-closed", type=float, default=0.0,
                    help="Motor position (rad) when gripper is fully closed (default: motor zero)")
+    p.add_argument("--gripper-kp", type=float, default=10.0,
+                   help="DM4310 MIT position gain (default: 10.0)")
+    p.add_argument("--gripper-kd", type=float, default=0.5,
+                   help="DM4310 MIT velocity damping gain (default: 0.5)")
     p.add_argument("--gripper-max-vel", type=float, default=1.5,
                    help="Max gripper speed in rad/s (limits jump on start, default: 1.5)")
     p.add_argument("--calibrate", action="store_true")
