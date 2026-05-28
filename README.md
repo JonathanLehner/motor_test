@@ -45,6 +45,7 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
 ## Files
 
 - `setup_env.sh`: creates or reuses `.venv` and installs dependencies
+- `atc_setup.py`: configures Feetech motor IDs for an Automatic Tool Changer
 - `test_waveshare_communication.py`: checks basic serial communication with a Waveshare controller board
 - `test_motor_scan.py`: scans Feetech motors across several baud rates
 - `test_single_motor.py`: controls one motor and provides an interactive position prompt
@@ -140,7 +141,38 @@ python test_open_close.py
 
 This is useful for simple repeatability or stress checks. Stop it with `Ctrl+C`.
 
-### 5. Run LeRobot motor setup
+### 5. Configure ATC motors
+
+`atc_setup.py` assigns the correct IDs to Feetech motors used in an Automatic Tool Changer. Connect one motor at a time when prompted. The script scans all common baud rates automatically — no need to know the motor's current settings.
+
+ID assignment:
+
+| Motor | ID |
+|---|---|
+| ATC lock mechanism | 1 |
+| Tool motor (first / only) | 2 |
+| Tool motor (second, if present) | 3 |
+
+IDs 2 and 3 are the same for every tool — they describe the motors *within* a tool, not which tool number it is.
+
+```bash
+# Configure the ATC lock motor only
+pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target atc
+
+# Configure a tool with 1 motor (ID 2)
+pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target tool
+
+# Configure a tool with 2 motors (IDs 2 and 3)
+pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target tool --motors 2
+
+# Configure ATC + tool (1 motor) in one go
+pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all
+
+# Configure ATC + tool (2 motors) in one go
+pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all --motors 2
+```
+
+### 6. Run LeRobot motor setup
 
 Example:
 
