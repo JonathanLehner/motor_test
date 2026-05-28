@@ -35,11 +35,11 @@ SCS_MODELS = {"scs0009"}
 SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 128_000, 115_200, 57_600, 38_400, 19_200]
 
 
-def scan_for_motor(port: str, protocol_version: int) -> tuple[int, int]:
+def scan_for_motor(port: str, protocol_version: int, model: str) -> tuple[int, int]:
     """Return (baudrate, motor_id) of the single connected motor."""
     probe = FeetechMotorsBus(
         port=port,
-        motors={"probe": Motor(1, "sts3215", MotorNormMode.RANGE_M100_100)},
+        motors={"probe": Motor(1, model, MotorNormMode.RANGE_M100_100)},
         protocol_version=protocol_version,
     )
     probe.connect(handshake=False)
@@ -70,7 +70,7 @@ def setup_motor(port: str, motor_id: int, label: str, model: str) -> None:
     protocol_version = 1 if model in SCS_MODELS else 0
 
     print("Scanning for motor (this may take a moment)...")
-    initial_baudrate, initial_id = scan_for_motor(port, protocol_version)
+    initial_baudrate, initial_id = scan_for_motor(port, protocol_version, model)
 
     name = f"motor_{motor_id}"
     bus = FeetechMotorsBus(
