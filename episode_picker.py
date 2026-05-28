@@ -598,6 +598,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .cliprow .tag { color: var(--clip); }
   .cliprow button { padding: 3px 9px; font-size: 12px; }
   .hint { color: var(--mut); font-size: 12px; margin-top: 14px; }
+  .howto { background: #16202b; border: 1px solid var(--line); border-left: 3px solid var(--play);
+           padding: 10px 14px; border-radius: 6px; font-size: 13px; line-height: 1.6; margin: 6px 0 12px; }
+  .howto b { color: var(--ink); }
+  .howto .ico { color: var(--clip); }
   .banner { background: #3a2a1a; border: 1px solid var(--accent); color: var(--accent); padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 14px; }
   kbd { background:#0e1014; border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:11px; }
 </style>
@@ -745,21 +749,32 @@ function show(i) {
     + `<div class="vids">${vids}</div>`
     + `<div class="timeline" id="tl"></div>`
     + `<div class="tlabels"><span id="tlcur">0:00.0</span><span id="tlend">0:00.0</span></div>`
+    + `<div class="howto">`
+    + `<b>Splitting this episode into sub-episodes:</b> scrub/play to where a good segment `
+    + `<i>starts</i> and press <kbd>I</kbd> (set IN); scrub to where it <i>ends</i> and press <kbd>O</kbd> (set OUT). `
+    + `That creates one <span class="ico">▮ clip</span> (a green span on the bar below the playhead). `
+    + `Mark as many clips as you like across the episode. `
+    + `On export, <b>each clip becomes its own separate episode</b>, and everything <i>outside</i> the clips is dropped — `
+    + `that's how one recording is split into several. The bar shows the clips and the blue playhead; click it to seek.`
+    + `<br><b style="color:var(--play)">Nothing is modified here</b> — your clips are only saved to <code>episode_clips.json</code>. `
+    + `The split dataset is created (in a NEW folder, original untouched) only when you run `
+    + `<code>python episode_picker.py --dataset … --export &lt;out&gt;</code>.`
+    + `</div>`
     + `<div class="controls">`
-    + `<button class="ghost" onclick="step(-1)">◀ frame</button>`
+    + `<button class="ghost" onclick="step(-1)" title="Step back one frame (hold Shift = 1 second)">◀ frame</button>`
     + `<button class="ghost" onclick="togglePlay()" id="playbtn">⏸ pause</button>`
-    + `<button class="ghost" onclick="step(1)">frame ▶</button>`
-    + `<button class="in" onclick="setIn()">⟦ IN  (I)</button>`
-    + `<button class="out" onclick="setOut()">OUT ⟧  (O)</button>`
-    + `<button class="ghost" onclick="addWhole()">whole episode</button>`
-    + `<button class="ghost" onclick="delAtPlayhead()">✗ clip @playhead (X)</button>`
+    + `<button class="ghost" onclick="step(1)" title="Step forward one frame (hold Shift = 1 second)">frame ▶</button>`
+    + `<button class="in" onclick="setIn()" title="Mark the START of a clip at the current playhead position">⟦ Set IN (I)</button>`
+    + `<button class="out" onclick="setOut()" title="Mark the END at the playhead — creates a clip from IN to here">Set OUT ⟧ (O)</button>`
+    + `<button class="ghost" onclick="addWhole()" title="Keep the entire episode as ONE clip (export it unsplit, as a single sub-episode)">＋ Whole episode</button>`
+    + `<button class="ghost" onclick="delAtPlayhead()" title="Delete the clip that the playhead is currently inside">✗ Delete clip at playhead (X)</button>`
     + `</div>`
     + `<div class="cliplist" id="cliplist"></div>`
     + `<div class="hint">`
-    + `<kbd>I</kbd> set in · <kbd>O</kbd> set out (makes a clip) · <kbd>X</kbd> delete clip under playhead · `
-    + `<kbd>Space</kbd> play/pause · <kbd>←</kbd>/<kbd>→</kbd> step frame (<kbd>Shift</kbd> = 1s) · `
-    + `<kbd>[</kbd>/<kbd>]</kbd> prev/next episode. Each clip exports as one sub-episode; `
-    + `gaps between clips are dropped. Auto-saved to episode_clips.json.</div>`;
+    + `<b>Keys:</b> <kbd>I</kbd> set IN · <kbd>O</kbd> set OUT (creates a clip) · <kbd>X</kbd> delete the clip under the playhead · `
+    + `<kbd>Space</kbd> play/pause · <kbd>←</kbd>/<kbd>→</kbd> step one frame (<kbd>Shift</kbd> = 1 second) · `
+    + `<kbd>[</kbd> / <kbd>]</kbd> previous / next episode. `
+    + `Your clips auto-save to episode_clips.json, so you can stop and resume anytime.</div>`;
 
   VIDS = Array.from(v.querySelectorAll('video'));
   VIDS.forEach(vid => applyWindow(vid, parseFloat(vid.dataset.from)||0,
@@ -804,7 +819,7 @@ function updatePlayhead() {
 function renderClipList() {
   const el = document.getElementById('cliplist'); if (!el) return;
   const e = curEp(); const clips = e.clips || []; const N = e.frames;
-  if (!clips.length) { el.innerHTML = `<div class="sub">No clips yet — mark IN then OUT to create one.</div>`; return; }
+  if (!clips.length) { el.innerHTML = `<div class="sub">No clips yet. Press <kbd>I</kbd> at a start point, then <kbd>O</kbd> at an end point to create a clip (= one exported sub-episode). This episode won't export anything until it has at least one clip — use <b>＋ Whole episode</b> to keep all of it.</div>`; return; }
   el.innerHTML = clips.map((c, idx) => {
     const f0 = Math.round(c[0]*N), f1 = Math.round(c[1]*N);
     return `<div class="cliprow"><span class="tag">clip ${idx+1}</span>`
