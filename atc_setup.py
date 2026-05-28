@@ -46,16 +46,34 @@ def scan_for_motor(port: str, protocol_version: int, model: str) -> tuple[int, i
     try:
         for baudrate in SCAN_BAUDRATES:
             probe.set_baudrate(baudrate)
-            result = probe.broadcast_ping()
-            if result:
-                if len(result) > 1:
+            if protocol_version == 0:
+                result = probe.broadcast_ping()
+                if result:
+                    if len(result) > 1:
+                        raise RuntimeError(
+                            f"Found {len(result)} motors: {list(result.keys())}. "
+                            "Connect ONLY the motor you want to configure."
+                        )
+                    motor_id = next(iter(result))
+                    print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
+                    return baudrate, motor_id
+            else:
+                # Protocol 1 (SCS) does not support broadcast ping — probe IDs sequentially.
+                # Model number register: address 3, length 2.
+                found = []
+                for mid in range(1, 21):
+                    value, comm, _ = probe._read(3, 2, mid, raise_on_error=False, err_msg="")
+                    if value is not None and comm == 0:
+                        found.append(mid)
+                if len(found) > 1:
                     raise RuntimeError(
-                        f"Found {len(result)} motors: {list(result.keys())}. "
+                        f"Found {len(found)} motors: {found}. "
                         "Connect ONLY the motor you want to configure."
                     )
-                motor_id = next(iter(result))
-                print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
-                return baudrate, motor_id
+                if found:
+                    motor_id = found[0]
+                    print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
+                    return baudrate, motor_id
     finally:
         probe.disconnect(disable_torque=False)
     raise RuntimeError("No motor found. Check the connection and power.")
