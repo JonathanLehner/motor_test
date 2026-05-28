@@ -76,6 +76,16 @@ If one mirror is slow or unavailable, replace the Tsinghua URL above with the Al
 https://mirrors.aliyun.com/pypi/simple/
 ```
 
+## Finding the serial port
+
+To find the port name of a connected Waveshare/Feetech controller board:
+
+```bash
+pipenv run lerobot-find-port
+```
+
+Plug in the board, run the command, and it will print the port (e.g. `/dev/tty.usbmodemXXXX` on macOS or `/dev/ttyUSB0` on Linux).
+
 ## What to change before running
 
 These scripts currently hardcode the serial port and motor settings near the top of each file. Before running them, update values such as:
@@ -170,6 +180,12 @@ pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all
 
 # Configure ATC + tool (2 motors) in one go
 pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all --motors 2
+```
+
+The default motor model is `sts3215`. For SCS-series motors (e.g. `scs0009`) add `--model scs0009`:
+
+```bash
+pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all --model scs0009
 ```
 
 ### 6. Run LeRobot motor setup
