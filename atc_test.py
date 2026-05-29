@@ -60,8 +60,10 @@ def torque(handler, motor_id, enable):
     state = "enabled" if enable else "disabled"
     if result != COMM_SUCCESS:
         print(f"  Warning: torque {state} failed for ID {motor_id} (result={result}, error={error})")
-    else:
-        print(f"  Torque {state} for ID {motor_id}")
+        return
+    handler.portHandler.clearPort()
+    readback, comm2, _ = handler.read1ByteTxRx(motor_id, TORQUE_ADDR)
+    print(f"  Torque register: {readback} (0=off, 1=on)")
 
 
 def record_range(handler, motor_id):
