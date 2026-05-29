@@ -46,6 +46,7 @@ def open_port(port):
 
 
 def read_pos(handler, motor_id):
+    handler.portHandler.clearPort()
     pos, comm, _ = handler.ReadPos(motor_id)
     if comm != COMM_SUCCESS:
         raise RuntimeError(f"Failed to read position from ID {motor_id}")
@@ -69,14 +70,12 @@ def record_range(handler, motor_id):
         while state["running"]:
             try:
                 pos = read_pos(handler, motor_id)
-                if pos < state["min"]:
-                    state["min"] = pos
-                if pos > state["max"]:
-                    state["max"] = pos
+                state["min"] = min(state["min"], pos)
+                state["max"] = max(state["max"], pos)
                 print(f"\r    pos={pos}  min={int(state['min'])}  max={int(state['max'])}    ", end="", flush=True)
             except Exception:
                 pass
-            time.sleep(0.05)
+            time.sleep(0.1)
         print()
 
     t = threading.Thread(target=poll, daemon=True)
