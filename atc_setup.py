@@ -54,9 +54,13 @@ def find_motor(port: str, model: str) -> tuple[int, int]:
                     print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
                     return baudrate, motor_id
             else:
-                # Protocol 1 (SCS) does not support broadcast ping.
-                for try_id in range(0, 20):
-                    if bus.ping(try_id) is not None:
+                # Protocol 1 (SCS): no broadcast ping. Call packet_handler directly
+                # so we only check comm success and ignore the error byte — a factory
+                # motor may have error bits set (overload, voltage) that would cause
+                # bus.ping() to silently return None even when the motor responds.
+                for try_id in range(1, 21):
+                    _, comm, _ = bus.packet_handler.ping(bus.port_handler, try_id)
+                    if bus._is_comm_success(comm):
                         print(f"  Found motor: ID={try_id} at baudrate={baudrate}")
                         return baudrate, try_id
     finally:
