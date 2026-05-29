@@ -22,9 +22,15 @@ from scservo_sdk.sms_sts import sms_sts
 
 
 class EchoFreePortHandler(PortHandler):
+    def openPort(self):
+        result = super().openPort()
+        if result:
+            self.ser.timeout = 0.01
+        return result
+
     def writePort(self, packet):
         result = super().writePort(packet)
-        self.ser.read(len(packet))  # consume exactly the echoed bytes
+        self.ser.read(len(packet))
         return result
 from scservo_sdk.scscl import scscl
 from scservo_sdk.scservo_def import COMM_SUCCESS

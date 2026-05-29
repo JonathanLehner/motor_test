@@ -36,9 +36,15 @@ from scservo_sdk.scservo_def import COMM_SUCCESS
 
 class EchoFreePortHandler(PortHandler):
     """Discards TX echo on half-duplex RS485 bus before reading the response."""
+    def openPort(self):
+        result = super().openPort()
+        if result:
+            self.ser.timeout = 0.01
+        return result
+
     def writePort(self, packet):
         result = super().writePort(packet)
-        self.ser.read(len(packet))  # consume exactly the echoed bytes
+        self.ser.read(len(packet))
         return result
 
 CALIBRATION_FILE = Path("atc_calibration.json")
