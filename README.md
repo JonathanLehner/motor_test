@@ -1,6 +1,8 @@
 # motor_test
 
-This directory contains a small set of Python scripts for testing LeRobot/Feetech motor communication, scanning for motors, driving a single motor, and repeatedly opening and closing a gripper.
+This directory contains a small set of Python scripts for testing Feetech motor communication, scanning for motors, driving a single motor, repeatedly opening and closing a gripper, and configuring/calibrating the motors of an Automatic Tool Changer (ATC).
+
+The ATC scripts (`atc_setup.py`, `atc_test.py`) and the raw scanners (`test_raw.py`, `test_scs_scan.py`) talk to the servos directly with the Feetech SDK (`ftservo-python-sdk`, imported as `scservo_sdk`) — they do **not** use LeRobot. The remaining `test_*` and `lerobot_*` scripts use LeRobot.
 
 For the Chinese version of this guide, see [README.zh.md](/Users/jonathanlehner/wundercode/robotics/motor_test/README.zh.md).
 
@@ -47,6 +49,8 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
 - `setup_env.sh`: creates or reuses `.venv` and installs dependencies
 - `atc_setup.py`: configures Feetech motor IDs for an Automatic Tool Changer
 - `atc_test.py`: calibrates and tests ATC lock and tool motors interactively
+- `test_raw.py`: raw byte-level scanner (pure pyserial, no SDK) — the ground-truth tool for "is the servo even talking?"
+- `test_scs_scan.py`: scans for ST/SMS and SC servos using the Feetech SDK high-level classes
 - `test_waveshare_communication.py`: checks basic serial communication with a Waveshare controller board
 - `test_motor_scan.py`: scans Feetech motors across several baud rates
 - `test_single_motor.py`: controls one motor and provides an interactive position prompt
@@ -58,6 +62,23 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
 - Python 3.10 or newer
 - A connected serial device
 - A powered Feetech motor / Waveshare controller board
+
+### SDK note: ftservo-python-sdk vs feetech-servo-sdk (conflict)
+
+The ATC scripts import `scservo_sdk` and use its high-level `sms_sts` / `scscl` classes. Those classes are provided by **`ftservo-python-sdk`**:
+
+```bash
+pip install ftservo-python-sdk
+```
+
+⚠️ This conflicts with **LeRobot**. Both `ftservo-python-sdk` and `feetech-servo-sdk` (a LeRobot dependency) install a module named `scservo_sdk`, but with different APIs:
+
+| Package | Provides | Used by |
+|---|---|---|
+| `ftservo-python-sdk` | `sms_sts`, `scscl` | `atc_*.py`, `test_raw.py`, `test_scs_scan.py` |
+| `feetech-servo-sdk` | `PacketHandler` | LeRobot (`lerobot_*`, `test_motor_scan.py`, …) |
+
+Whichever is installed last wins the `scservo_sdk` namespace and breaks the other. In practice: install `ftservo-python-sdk` to run the ATC scripts; install `feetech-servo-sdk` (or just install LeRobot) to run the LeRobot scripts. Keeping both sets working at once requires separate virtualenvs, or vendoring one SDK under a private module name.
 
 ## Manual installation
 
@@ -86,6 +107,43 @@ pipenv run lerobot-find-port
 ```
 
 Plug in the board, run the command, and it will print the port (e.g. `/dev/tty.usbmodemXXXX` on macOS or `/dev/ttyUSB0` on Linux).
+
+## Hardware setup (Waveshare Bus Servo Adapter A)
+
+The ATC uses the **Waveshare Bus Servo Adapter (A)** — a transparent USB↔single-wire-TTL adapter for Feetech ST/SC bus servos. Two things must be right or the servo will never respond, even though everything looks connected:
+
+1. **Control-mode jumper → position B (USB).** The adapter has a jumper that selects who drives the servo bus:
+   - **A** = UART header (Raspberry Pi / ESP32 / Arduino)
+   - **B** = USB (a PC over the USB-C port) ← use this for these scripts
+
+   If the jumper is in **A**, the USB chip still echoes your transmitted bytes back to you (so a scan "sees" traffic), but your packets never reach the servo and it never replies. This looks exactly like a dead motor. See the [wiring example](https://docs.waveshare.com/Bus_Servo_Adapter_A/Product-Wiring-Example).
+
+2. **External power: 6–7.4 V.** USB does **not** power the servos — the adapter needs a separate supply on its DC jack / terminal block, and the voltage must suit the servos:
+   - `sts3215` (ATC lock): 6–12.6 V
+   - `scs0009` (tool): 4.0–7.4 V
+
+   The overlap that powers **both** motor types is **6–7.4 V**. 5 V is too low for the sts3215 (it won't boot) and below the scs0009's 6 V nominal, so use ~6–7 V.
+
+### How the bus works (so the scripts make sense)
+
+- All servos share **one half-duplex single-wire bus**. TX and RX share the same line, so the adapter **echoes** every byte you send. The scripts account for this: `EchoFreePortHandler` consumes the echo before reading the real reply, and `test_raw.py` strips the echoed request and only reports a servo as "found" if there are genuine response bytes after the echo.
+- Every servo on the bus must have a **unique ID** and run at the **same baud rate** (the scripts use 1 Mbps).
+- Two servo families are supported and can coexist on the same bus:
+  - **ST/SMS** (e.g. `sts3215`) — protocol 0, little-endian → SDK class `sms_sts`
+  - **SC** (e.g. `scs0009`) — protocol 1, big-endian → SDK class `scscl`
+
+  The scripts pick the right class from the model name, so a tool motor can be either family.
+
+### First, prove the servo talks
+
+Before configuring or calibrating anything, confirm the servo actually responds:
+
+```bash
+python test_raw.py --port /dev/ttyACM0 --verbose
+```
+
+- A line like `FOUND baud=1000000 ID=1 ...` means comms are good.
+- "No real motor responses found (only echo)" means the servo isn't replying — check the jumper (B) and the 6–7.4 V supply first.
 
 ## What to change before running
 
@@ -183,42 +241,53 @@ pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all
 pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all --motors 2
 ```
 
-The ATC lock motor is STS-series (protocol 0, uses broadcast ping). Tool motors are SCS-series (protocol 1, uses sequential ping). Defaults match this:
+**How it works:** for each motor the script scans every Feetech baud rate, pings IDs 1–20, and verifies a hit by reading the ID register back (so the bus echo can't cause a false match). When it finds the single connected motor it writes the target ID and sets the baud rate to 1 Mbps via the EPROM lock/unlock sequence.
+
+**Motor models.** The default models are `sts3215` for the ATC lock and `scs0009` for the tool, but the tool motor can be either family depending on the tool version. Set it with `--model` (for `--target tool`) or `--tool-model` (for `--target all`):
 
 ```bash
-# Configure ATC lock (sts3215, protocol 0)
-pipenv run python atc_setup.py --port /dev/ttyACM1 --target atc
+# ATC lock (defaults to sts3215)
+python atc_setup.py --port /dev/ttyACM0 --target atc
 
-# Configure a tool with 1 scs0009 motor
-pipenv run python atc_setup.py --port /dev/ttyACM1 --target tool --model scs0009
+# A tool whose motor is an scs0009 (the default)
+python atc_setup.py --port /dev/ttyACM0 --target tool
 
-# Configure ATC + tool in one go (uses defaults: atc=sts3215, tool=scs0009)
-pipenv run python atc_setup.py --port /dev/ttyACM1 --target all
+# A tool whose motor is an sts3215 instead
+python atc_setup.py --port /dev/ttyACM0 --target tool --model sts3215
+
+# ATC + tool in one go, tool is sts3215
+python atc_setup.py --port /dev/ttyACM0 --target all --tool-model sts3215
 ```
 
 ### 6. Test and calibrate ATC motors
 
-`atc_test.py` has two modes:
+`atc_test.py` has two modes. As with setup, the tool model is selectable (`--tool-model scs0009` default, or `--tool-model sts3215`); the ATC model defaults to `sts3215` (`--atc-model`).
 
-**Calibration** (`--calibrate`): records the ATC lock/unlock positions and the tool motor range of motion. Results are saved to `atc_calibration.json`.
+**Calibration** (`--calibrate atc|tool|all`): records the ATC lock/unlock positions and the tool motor range of motion. Results are saved to `atc_calibration.json`. The motors' torque is disabled during calibration so you can move them by hand.
 
 ```bash
-# Calibrate ATC + tool (defaults: atc=sts3215, tool=scs0009)
-pipenv run python atc_test.py --port /dev/ttyACM1 --calibrate
+# Calibrate both ATC and tool (defaults: atc=sts3215, tool=scs0009)
+python atc_test.py --port /dev/ttyACM0 --calibrate all
 
-# With 2 tool motors
-pipenv run python atc_test.py --port /dev/ttyACM1 --motors 2 --calibrate
+# Only the ATC lock positions
+python atc_test.py --port /dev/ttyACM0 --calibrate atc
+
+# Only the tool, and this tool uses an sts3215 motor
+python atc_test.py --port /dev/ttyACM0 --calibrate tool --tool-model sts3215
+
+# Tool with 2 motors
+python atc_test.py --port /dev/ttyACM0 --calibrate all --motors 2
 ```
 
-During calibration you will be prompted to:
+During calibration you are prompted to:
 1. Move the ATC to the locked position → press ENTER
 2. Move the ATC to the unlocked position → press ENTER
-3. Move each tool motor through its full range → press ENTER to stop
+3. Move each tool motor through its full range → the live position is printed as you move it; press ENTER to stop. The min/max seen become the tool's range.
 
-**Interactive mode** (no flag): loads the saved calibration and accepts commands.
+**Interactive mode** (no `--calibrate`): loads the saved calibration and accepts commands. The ATC and tool motors share the one bus, so they're driven over a single connection. Match `--atc-model`/`--tool-model`/`--motors` to your setup.
 
 ```bash
-pipenv run python atc_test.py --port /dev/ttyACM1
+python atc_test.py --port /dev/ttyACM0
 ```
 
 | Command | Action |
@@ -251,12 +320,21 @@ You can also use a `robot` configuration instead of `teleop`. Supported device t
 
 ## Troubleshooting
 
+### Scan finds nothing / motor never responds ("only echo")
+
+This is the most common ATC problem and it's almost always the adapter, not the motor or the code. In order:
+
+1. **Jumper in position B (USB).** In position A the USB port is disconnected from the servo bus; you get the adapter's echo but no servo reply. This produces "No real motor responses found (only echo)" in `test_raw.py`.
+2. **Supply is 6–7.4 V** (not USB-only, not 5 V). See [Hardware setup](#hardware-setup-waveshare-bus-servo-adapter-a).
+3. **3-pin cable seated and not reversed.**
+4. Run `python test_raw.py --port <PORT> --verbose` — if `RX=` shows only the echo of your `TX=` and nothing after it, the servo isn't getting the command (revisit 1–3). If you see extra bytes after the echo, the servo is talking and the higher-level scripts will work.
+
 ### No response received
 
 Check:
 
-- the motor has external power
-- TX/RX wiring is correct
+- the motor has external power (6–7.4 V on the adapter, not USB alone)
+- the control-mode jumper is in position B (USB)
 - the serial port path is correct
 - the baud rate is correct
 - the motor ID is correct

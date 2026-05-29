@@ -35,7 +35,8 @@ class EchoFreePortHandler(PortHandler):
 from scservo_sdk.scscl import scscl
 from scservo_sdk.scservo_def import COMM_SUCCESS
 
-SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 115_200, 57_600, 19_200]
+# All Feetech-supported baud codes (0..7)
+SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 128_000, 115_200, 76_800, 57_600, 38_400]
 TARGET_BAUDRATE = 1_000_000
 BAUD_CODE = {1_000_000: 0, 500_000: 1, 250_000: 2, 115_200: 4, 57_600: 6, 19_200: 7}
 
