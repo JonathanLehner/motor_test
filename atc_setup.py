@@ -16,8 +16,10 @@ Usage:
 
 import argparse
 
-from scservo_sdk import PortHandler, COMM_SUCCESS
-from scservo_sdk import sms_sts, scscl
+from scservo_sdk.port_handler import PortHandler
+from scservo_sdk.sms_sts import sms_sts
+from scservo_sdk.scscl import SCSCL
+from scservo_sdk.scservo_def import COMM_SUCCESS
 
 SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 115_200, 57_600, 19_200]
 TARGET_BAUDRATE = 1_000_000
@@ -31,7 +33,7 @@ SCS_MODELS = {"scs0009"}
 
 def make_handler(port, model):
     ph = PortHandler(port)
-    handler = scscl(ph) if model in SCS_MODELS else sms_sts(ph)
+    handler = SCSCL(ph) if model in SCS_MODELS else sms_sts(ph)
     return ph, handler
 
 
