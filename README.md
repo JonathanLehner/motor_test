@@ -46,6 +46,7 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
 
 - `setup_env.sh`: creates or reuses `.venv` and installs dependencies
 - `atc_setup.py`: configures Feetech motor IDs for an Automatic Tool Changer
+- `atc_test.py`: calibrates and tests ATC lock and tool motors interactively
 - `test_waveshare_communication.py`: checks basic serial communication with a Waveshare controller board
 - `test_motor_scan.py`: scans Feetech motors across several baud rates
 - `test_single_motor.py`: controls one motor and provides an interactive position prompt
@@ -185,10 +186,50 @@ pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all --motor
 The default motor model is `sts3215`. For SCS-series motors (e.g. `scs0009`) add `--model scs0009`:
 
 ```bash
-pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all --model scs0009
+# Configure ATC lock (scs0009)
+pipenv run python atc_setup.py --port /dev/ttyACM1 --target atc --model scs0009
+
+# Configure a tool with 1 motor (scs0009)
+pipenv run python atc_setup.py --port /dev/ttyACM1 --target tool --model scs0009
+
+# Configure ATC + tool (2 motors, scs0009)
+pipenv run python atc_setup.py --port /dev/ttyACM1 --target all --motors 2 --model scs0009
 ```
 
-### 6. Run LeRobot motor setup
+### 6. Test and calibrate ATC motors
+
+`atc_test.py` has two modes:
+
+**Calibration** (`--calibrate`): records the ATC lock/unlock positions and the tool motor range of motion. Results are saved to `atc_calibration.json`.
+
+```bash
+# Calibrate ATC + tool (1 motor)
+pipenv run python atc_test.py --port /dev/ttyACM1 --calibrate
+
+# Calibrate with scs0009 and 2 tool motors
+pipenv run python atc_test.py --port /dev/ttyACM1 --model scs0009 --motors 2 --calibrate
+```
+
+During calibration you will be prompted to:
+1. Move the ATC to the locked position → press ENTER
+2. Move the ATC to the unlocked position → press ENTER
+3. Move each tool motor through its full range → press ENTER to stop
+
+**Interactive mode** (no flag): loads the saved calibration and accepts commands.
+
+```bash
+pipenv run python atc_test.py --port /dev/ttyACM1
+```
+
+| Command | Action |
+|---|---|
+| `l` | Lock ATC |
+| `u` | Unlock ATC |
+| `a` | Activate tool (move to range max) |
+| `h` | Home tool (move to range min) |
+| `q` | Quit |
+
+### 7. Run LeRobot motor setup
 
 Example:
 
