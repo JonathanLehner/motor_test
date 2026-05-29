@@ -16,7 +16,8 @@ import time
 
 import serial
 
-BAUDRATES = [1_000_000, 500_000, 250_000, 115_200, 57_600, 19_200]
+# All Feetech-supported baud codes (0..7)
+BAUDRATES = [1_000_000, 500_000, 250_000, 128_000, 115_200, 76_800, 57_600, 38_400]
 
 
 def checksum(body):
