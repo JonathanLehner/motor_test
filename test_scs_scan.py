@@ -9,11 +9,20 @@ Usage:
 """
 
 import argparse
+import time
 
 from scservo_sdk.port_handler import PortHandler
 from scservo_sdk.sms_sts import sms_sts
 from scservo_sdk.scscl import scscl
 from scservo_sdk.scservo_def import COMM_SUCCESS
+
+
+class EchoFreePortHandler(PortHandler):
+    def writePort(self, packet):
+        result = super().writePort(packet)
+        time.sleep(0.005)
+        self.ser.read(self.ser.in_waiting)
+        return result
 
 BAUDRATES = [1_000_000, 500_000, 250_000, 115_200]
 IDS = range(1, 11)
@@ -29,7 +38,7 @@ def scan(port):
     print("-" * 50)
 
     found_any = False
-    ph = PortHandler(port)
+    ph = EchoFreePortHandler(port)
     if not ph.openPort():
         raise RuntimeError(f"Cannot open port {port}")
 

@@ -15,9 +15,18 @@ Usage:
 """
 
 import argparse
+import time
 
 from scservo_sdk.port_handler import PortHandler
 from scservo_sdk.sms_sts import sms_sts
+
+
+class EchoFreePortHandler(PortHandler):
+    def writePort(self, packet):
+        result = super().writePort(packet)
+        time.sleep(0.005)
+        self.ser.read(self.ser.in_waiting)
+        return result
 from scservo_sdk.scscl import scscl
 from scservo_sdk.scservo_def import COMM_SUCCESS
 
@@ -32,7 +41,7 @@ SCS_MODELS = {"scs0009"}
 
 
 def make_handler(port, model):
-    ph = PortHandler(port)
+    ph = EchoFreePortHandler(port)
     handler = scscl(ph) if model in SCS_MODELS else sms_sts(ph)
     return ph, handler
 

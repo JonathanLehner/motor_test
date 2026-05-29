@@ -26,10 +26,21 @@ import threading
 import time
 from pathlib import Path
 
+import time
+
 from scservo_sdk.port_handler import PortHandler
 from scservo_sdk.sms_sts import sms_sts
 from scservo_sdk.scscl import scscl
 from scservo_sdk.scservo_def import COMM_SUCCESS
+
+
+class EchoFreePortHandler(PortHandler):
+    """Discards TX echo on half-duplex RS485 bus before reading the response."""
+    def writePort(self, packet):
+        result = super().writePort(packet)
+        time.sleep(0.005)
+        self.ser.read(self.ser.in_waiting)  # drain echo bytes
+        return result
 
 CALIBRATION_FILE = Path("atc_calibration.json")
 ATC_ID = 1
@@ -38,7 +49,7 @@ TORQUE_ADDR = 40
 
 
 def open_port(port):
-    ph = PortHandler(port)
+    ph = EchoFreePortHandler(port)
     if not ph.openPort():
         raise RuntimeError(f"Cannot open port {port}")
     ph.setBaudRate(1_000_000)
