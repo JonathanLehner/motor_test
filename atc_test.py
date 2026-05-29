@@ -228,15 +228,17 @@ def main():
     )
     parser.add_argument(
         "--calibrate",
-        action="store_true",
-        help="Run calibration: record ATC lock positions and tool range of motion",
+        choices=["atc", "tool", "all"],
+        help="Calibrate: atc = lock positions only, tool = tool range only, all = both",
     )
     args = parser.parse_args()
 
     if args.calibrate:
         cal = load_calibration()
-        cal["atc"] = calibrate_atc(args.port)
-        cal["tool"] = calibrate_tool(args.port, args.motors)
+        if args.calibrate in ("atc", "all"):
+            cal["atc"] = calibrate_atc(args.port)
+        if args.calibrate in ("tool", "all"):
+            cal["tool"] = calibrate_tool(args.port, args.motors)
         save_calibration(cal)
     else:
         interactive(args.port, args.motors)
