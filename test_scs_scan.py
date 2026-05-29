@@ -20,7 +20,8 @@ from scservo_sdk.scservo_def import COMM_SUCCESS
 class EchoFreePortHandler(PortHandler):
     def writePort(self, packet):
         result = super().writePort(packet)
-        self.ser.read(len(packet))  # consume exactly the echoed bytes
+        time.sleep(len(packet) * 8 / 1_000_000 + 0.0002)  # TX time + 200µs margin
+        self.ser.read(self.ser.in_waiting)  # drain whatever arrived (echo)
         return result
 
 BAUDRATES = [1_000_000, 500_000, 250_000, 115_200]
@@ -40,6 +41,7 @@ def scan(port):
     ph = EchoFreePortHandler(port)
     if not ph.openPort():
         raise RuntimeError(f"Cannot open port {port}")
+    print(f"  serial timeout: {ph.ser.timeout}")
 
     try:
         for label, handler_cls in CONFIGS:
