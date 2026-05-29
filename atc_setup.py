@@ -26,57 +26,17 @@ Usage:
 """
 
 import argparse
+import re
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
 # SCS series uses protocol 1; STS/SMS series uses protocol 0
 SCS_MODELS = {"scs0009"}
-SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 128_000, 115_200, 57_600, 38_400, 19_200]
 
 
-def scan_for_motor(port: str, protocol_version: int, model: str) -> tuple[int, int]:
-    """Return (baudrate, motor_id) of the single connected motor."""
-    probe = FeetechMotorsBus(
-        port=port,
-        motors={"probe": Motor(1, model, MotorNormMode.RANGE_M100_100)},
-        protocol_version=protocol_version,
-    )
-    probe.connect(handshake=False)
-    try:
-        for baudrate in SCAN_BAUDRATES:
-            probe.set_baudrate(baudrate)
-            if protocol_version == 0:
-                result = probe.broadcast_ping()
-                if result:
-                    if len(result) > 1:
-                        raise RuntimeError(
-                            f"Found {len(result)} motors: {list(result.keys())}. "
-                            "Connect ONLY the motor you want to configure."
-                        )
-                    motor_id = next(iter(result))
-                    print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
-                    return baudrate, motor_id
-            else:
-                # Protocol 1 (SCS) does not support broadcast ping — probe IDs sequentially.
-                # Model number register: address 3, length 2.
-                found = []
-                for mid in range(1, 21):
-                    value, comm, _ = probe._read(3, 2, mid, raise_on_error=False, err_msg="")
-                    if value is not None and comm == 0:
-                        found.append(mid)
-                if len(found) > 1:
-                    raise RuntimeError(
-                        f"Found {len(found)} motors: {found}. "
-                        "Connect ONLY the motor you want to configure."
-                    )
-                if found:
-                    motor_id = found[0]
-                    print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
-                    return baudrate, motor_id
-    finally:
-        probe.disconnect(disable_torque=False)
-    raise RuntimeError("No motor found. Check the connection and power.")
+def protocol_for(model: str) -> int:
+    return 1 if model in SCS_MODELS else 0
 
 
 def setup_motor(port: str, motor_id: int, label: str, model: str) -> None:
@@ -85,19 +45,28 @@ def setup_motor(port: str, motor_id: int, label: str, model: str) -> None:
     print(f"{'=' * 60}")
     input(f"Connect ONLY this motor to {port}, then press ENTER...")
 
-    protocol_version = 1 if model in SCS_MODELS else 0
-
-    print("Scanning for motor (this may take a moment)...")
-    initial_baudrate, initial_id = scan_for_motor(port, protocol_version, model)
-
     name = f"motor_{motor_id}"
     bus = FeetechMotorsBus(
         port=port,
         motors={name: Motor(motor_id, model, MotorNormMode.RANGE_M100_100)},
-        protocol_version=protocol_version,
+        protocol_version=protocol_for(model),
     )
     try:
-        bus.setup_motor(name, initial_baudrate=initial_baudrate, initial_id=initial_id)
+        print("Scanning for motor (this may take a moment)...")
+        try:
+            bus.setup_motor(name)
+        except RuntimeError as e:
+            # lerobot's scanner found the motor but rejected it due to a model number
+            # mismatch (e.g. motor firmware reports a different number than the table).
+            # Parse the actual baudrate and ID from the error, then retry bypassing the check.
+            m_baud = re.search(r"baudrate=(\d+)", str(e))
+            m_id = re.search(r"with id=(\d+)", str(e))
+            if not (m_baud and m_id):
+                raise
+            found_baudrate = int(m_baud.group(1))
+            found_id = int(m_id.group(1))
+            print(f"  Motor found (ID={found_id}, baudrate={found_baudrate}), bypassing model check.")
+            bus.setup_motor(name, initial_baudrate=found_baudrate, initial_id=found_id)
         print(f"✓ Done: ID={motor_id}, model={model}")
     finally:
         if bus.is_connected:
