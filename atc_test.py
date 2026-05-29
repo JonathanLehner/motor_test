@@ -45,12 +45,14 @@ def open_port(port):
     return ph
 
 
+PRESENT_POSITION_ADDR = 56  # same address for both sms_sts and scscl
+
 def read_pos(handler, motor_id):
     handler.portHandler.clearPort()
-    pos, comm, _ = handler.ReadPos(motor_id)
+    data, comm, _ = handler.readTxRx(motor_id, PRESENT_POSITION_ADDR, 2)
     if comm != COMM_SUCCESS:
         raise RuntimeError(f"Failed to read position from ID {motor_id}")
-    return int(pos)
+    return data[0] | (data[1] << 8)  # little-endian, explicit
 
 
 def torque(handler, motor_id, enable):
