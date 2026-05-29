@@ -68,9 +68,11 @@ def record_range(handler, motor_id):
                     state["min"] = pos
                 if pos > state["max"]:
                     state["max"] = pos
+                print(f"\r    pos={pos}  min={int(state['min'])}  max={int(state['max'])}    ", end="", flush=True)
             except Exception:
                 pass
             time.sleep(0.05)
+        print()
 
     t = threading.Thread(target=poll, daemon=True)
     t.start()
