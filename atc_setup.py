@@ -7,6 +7,9 @@ Motor ID assignment:
   2 = Tool motor (first / only motor in a tool)
   3 = Tool motor (second motor, only for tools with 2 motors)
 
+All motors are expected to be at their factory default ID (1) and some baudrate.
+The script scans, finds the motor, then writes the target ID and 1 Mbps baudrate.
+
 Usage:
   # Configure the ATC lock motor
   python atc_setup.py --port /dev/tty.usbmodem... --target atc
@@ -26,17 +29,48 @@ Usage:
 """
 
 import argparse
-import re
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
 # SCS series uses protocol 1; STS/SMS series uses protocol 0
 SCS_MODELS = {"scs0009"}
+SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 115_200, 57_600, 19_200]
+# Factory-default IDs to probe — fresh motors typically ship at ID 1
+FACTORY_IDS = list(range(1, 21))
 
 
 def protocol_for(model: str) -> int:
     return 1 if model in SCS_MODELS else 0
+
+
+def find_motor(port: str, model: str) -> tuple[int, int]:
+    """Scan all common baudrates and IDs. Return (baudrate, motor_id)."""
+    bus = FeetechMotorsBus(
+        port=port,
+        motors={"probe": Motor(1, model, MotorNormMode.RANGE_M100_100)},
+        protocol_version=protocol_for(model),
+    )
+    bus.connect(handshake=False)
+    found = []
+    try:
+        for baudrate in SCAN_BAUDRATES:
+            bus.set_baudrate(baudrate)
+            for try_id in FACTORY_IDS:
+                if bus.ping(try_id) is not None:
+                    found.append((baudrate, try_id))
+    finally:
+        bus.disconnect(disable_torque=False)
+
+    if not found:
+        raise RuntimeError("No motor found. Check the connection and power.")
+    if len(found) > 1:
+        raise RuntimeError(
+            f"Found {len(found)} motors: {found}. Connect ONLY the motor you want to configure."
+        )
+    baudrate, motor_id = found[0]
+    print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
+    return baudrate, motor_id
 
 
 def setup_motor(port: str, motor_id: int, label: str, model: str) -> None:
@@ -45,6 +79,9 @@ def setup_motor(port: str, motor_id: int, label: str, model: str) -> None:
     print(f"{'=' * 60}")
     input(f"Connect ONLY this motor to {port}, then press ENTER...")
 
+    print("Scanning for motor (this may take a moment)...")
+    initial_baudrate, initial_id = find_motor(port, model)
+
     name = f"motor_{motor_id}"
     bus = FeetechMotorsBus(
         port=port,
@@ -52,21 +89,7 @@ def setup_motor(port: str, motor_id: int, label: str, model: str) -> None:
         protocol_version=protocol_for(model),
     )
     try:
-        print("Scanning for motor (this may take a moment)...")
-        try:
-            bus.setup_motor(name)
-        except RuntimeError as e:
-            # lerobot's scanner found the motor but rejected it due to a model number
-            # mismatch (e.g. motor firmware reports a different number than the table).
-            # Parse the actual baudrate and ID from the error, then retry bypassing the check.
-            m_baud = re.search(r"baudrate=(\d+)", str(e))
-            m_id = re.search(r"with id=(\d+)", str(e))
-            if not (m_baud and m_id):
-                raise
-            found_baudrate = int(m_baud.group(1))
-            found_id = int(m_id.group(1))
-            print(f"  Motor found (ID={found_id}, baudrate={found_baudrate}), bypassing model check.")
-            bus.setup_motor(name, initial_baudrate=found_baudrate, initial_id=found_id)
+        bus.setup_motor(name, initial_baudrate=initial_baudrate, initial_id=initial_id)
         print(f"✓ Done: ID={motor_id}, model={model}")
     finally:
         if bus.is_connected:
