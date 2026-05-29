@@ -48,8 +48,10 @@ def find_motor(port, model):
             for try_id in range(1, 21):
                 _, comm, _ = handler.ping(try_id)
                 if comm == COMM_SUCCESS:
-                    print(f"  Found motor: ID={try_id} at baudrate={baudrate}")
-                    return baudrate, try_id
+                    actual_id, comm2, _ = handler.read1ByteTxRx(try_id, ID_ADDR)
+                    if comm2 == COMM_SUCCESS and actual_id == try_id:
+                        print(f"  Found motor: ID={try_id} at baudrate={baudrate}")
+                        return baudrate, try_id
     finally:
         ph.closePort()
     raise RuntimeError(

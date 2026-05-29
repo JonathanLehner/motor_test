@@ -41,8 +41,11 @@ def scan(port):
                 for motor_id in IDS:
                     model_number, comm, error = handler.ping(motor_id)
                     if comm == COMM_SUCCESS:
-                        print(f"{baudrate:>10}  {label:>9}  {motor_id:>4}  {model_number:>7}  {error:#04x}")
-                        found_any = True
+                        # Verify: read ID register back to reject stale buffer hits
+                        actual_id, comm2, _ = handler.read1ByteTxRx(motor_id, 5)
+                        if comm2 == COMM_SUCCESS and actual_id == motor_id:
+                            print(f"{baudrate:>10}  {label:>9}  {motor_id:>4}  {model_number:>7}  {error:#04x}")
+                            found_any = True
     finally:
         ph.closePort()
 
