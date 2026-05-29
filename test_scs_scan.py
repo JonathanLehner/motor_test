@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-Scan for any Feetech motor (STS or SCS) using lerobot's bus.
-Reports comm status and error byte separately so you can see if a motor
-responds but has an error condition (overload, voltage, etc.).
+Scan for any Feetech motor (STS or SCS) using the high-level scservo_sdk classes.
+Reports model number and error byte so you can see if a motor responds but has
+an error condition (overload, voltage, etc.).
 
 Usage:
   python test_scs_scan.py --port /dev/ttyACM1
@@ -10,53 +10,45 @@ Usage:
 
 import argparse
 
-from lerobot.motors import Motor, MotorNormMode
-from lerobot.motors.feetech import FeetechMotorsBus
+from scservo_sdk import PortHandler, COMM_SUCCESS
+from scservo_sdk import sms_sts, scscl
 
 BAUDRATES = [1_000_000, 500_000, 250_000, 115_200]
 IDS = range(1, 11)
 CONFIGS = [
-    ("STS/SMS", "sts3215", 0),
-    ("SCS",     "scs0009", 1),
+    ("STS/SMS", sms_sts),
+    ("SCS",     scscl),
 ]
 
 
-def scan(port: str) -> None:
+def scan(port):
     print(f"Scanning {port} ...")
     print(f"{'Baudrate':>10}  {'Protocol':>9}  {'ID':>4}  {'Model':>7}  {'Error':>6}")
     print("-" * 50)
 
     found_any = False
+    ph = PortHandler(port)
+    if not ph.openPort():
+        raise RuntimeError(f"Cannot open port {port}")
 
-    for label, model, protocol_version in CONFIGS:
-        bus = FeetechMotorsBus(
-            port=port,
-            motors={"probe": Motor(1, model, MotorNormMode.RANGE_M100_100)},
-            protocol_version=protocol_version,
-        )
-        bus.connect(handshake=False)
-        try:
+    try:
+        for label, handler_cls in CONFIGS:
+            handler = handler_cls(ph)
             for baudrate in BAUDRATES:
-                bus.set_baudrate(baudrate)
-                if protocol_version == 0:
-                    result = bus.broadcast_ping()
-                    for motor_id, model_number in result.items():
-                        print(f"{baudrate:>10}  {label:>9}  {motor_id:>4}  {model_number:>7}  (broadcast)")
+                ph.setBaudRate(baudrate)
+                for motor_id in IDS:
+                    model_number, comm, error = handler.ping(motor_id)
+                    if comm == COMM_SUCCESS:
+                        print(f"{baudrate:>10}  {label:>9}  {motor_id:>4}  {model_number:>7}  {error:#04x}")
                         found_any = True
-                else:
-                    for try_id in IDS:
-                        model_number, comm, error = bus.packet_handler.ping(bus.port_handler, try_id)
-                        if bus._is_comm_success(comm):
-                            print(f"{baudrate:>10}  {label:>9}  {try_id:>4}  {model_number:>7}  {error:#04x}")
-                            found_any = True
-        finally:
-            bus.disconnect(disable_torque=False)
+    finally:
+        ph.closePort()
 
     if not found_any:
         print("No motors found.")
 
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", required=True)
     scan(parser.parse_args().port)

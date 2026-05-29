@@ -7,9 +7,6 @@ Motor ID assignment:
   2 = Tool motor 1        (SCS-series motor, e.g. scs0009)
   3 = Tool motor 2        (SCS-series motor, optional)
 
-All motors are expected to be at their factory default ID and baudrate.
-The script scans, finds the motor, then writes the target ID and 1 Mbps baudrate.
-
 Usage:
   python atc_setup.py --port /dev/ttyACM1 --target atc
   python atc_setup.py --port /dev/ttyACM1 --target tool --model scs0009
@@ -19,82 +16,78 @@ Usage:
 
 import argparse
 
-from lerobot.motors import Motor, MotorNormMode
-from lerobot.motors.feetech import FeetechMotorsBus
+from scservo_sdk import PortHandler, COMM_SUCCESS
+from scservo_sdk import sms_sts, scscl
+
+SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 115_200, 57_600, 19_200]
+TARGET_BAUDRATE = 1_000_000
+BAUD_CODE = {1_000_000: 0, 500_000: 1, 250_000: 2, 115_200: 4, 57_600: 6, 19_200: 7}
+
+ID_ADDR = 5
+BAUD_ADDR = 6
 
 SCS_MODELS = {"scs0009"}
-SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 115_200, 57_600, 19_200]
 
 
-def protocol_for(model: str) -> int:
-    return 1 if model in SCS_MODELS else 0
+def make_handler(port, model):
+    ph = PortHandler(port)
+    handler = scscl(ph) if model in SCS_MODELS else sms_sts(ph)
+    return ph, handler
 
 
-def find_motor(port: str, model: str) -> tuple[int, int]:
-    """Locate the single connected motor. Returns (baudrate, motor_id)."""
-    protocol = protocol_for(model)
-    bus = FeetechMotorsBus(
-        port=port,
-        motors={"probe": Motor(1, model, MotorNormMode.RANGE_M100_100)},
-        protocol_version=protocol,
-    )
-    bus.connect(handshake=False)
+def find_motor(port, model):
+    """Scan all baudrates/IDs and return (baudrate, motor_id)."""
+    ph, handler = make_handler(port, model)
+    if not ph.openPort():
+        raise RuntimeError(f"Cannot open port {port}")
     try:
         for baudrate in SCAN_BAUDRATES:
-            bus.set_baudrate(baudrate)
-            if protocol == 0:
-                result = bus.broadcast_ping()
-                if result:
-                    if len(result) > 1:
-                        raise RuntimeError(
-                            f"Found {len(result)} motors: {list(result.keys())}. "
-                            "Connect ONLY the motor you want to configure."
-                        )
-                    motor_id = next(iter(result))
-                    print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
-                    return baudrate, motor_id
-            else:
-                # Protocol 1 (SCS): no broadcast ping. Call packet_handler directly
-                # so we only check comm success and ignore the error byte — a factory
-                # motor may have error bits set (overload, voltage) that would cause
-                # bus.ping() to silently return None even when the motor responds.
-                for try_id in range(1, 21):
-                    _, comm, _ = bus.packet_handler.ping(bus.port_handler, try_id)
-                    if bus._is_comm_success(comm):
-                        print(f"  Found motor: ID={try_id} at baudrate={baudrate}")
-                        return baudrate, try_id
+            ph.setBaudRate(baudrate)
+            for try_id in range(1, 21):
+                _, comm, _ = handler.ping(try_id)
+                if comm == COMM_SUCCESS:
+                    print(f"  Found motor: ID={try_id} at baudrate={baudrate}")
+                    return baudrate, try_id
     finally:
-        bus.disconnect(disable_torque=False)
+        ph.closePort()
     raise RuntimeError(
-        f"No motor found for model '{model}' (protocol {protocol}). "
-        "Check the connection, power, and that only one motor is connected."
+        "No motor found. Check connection, power, and that only one motor is connected."
     )
 
 
-def setup_motor(port: str, motor_id: int, label: str, model: str) -> None:
+def configure_motor(port, model, initial_baudrate, initial_id, target_id):
+    """Write target ID and 1 Mbps baudrate to a motor."""
+    ph, handler = make_handler(port, model)
+    if not ph.openPort():
+        raise RuntimeError(f"Cannot open port {port}")
+    ph.setBaudRate(initial_baudrate)
+    try:
+        handler.unLockEprom(initial_id)
+        handler.write1ByteTxRx(initial_id, ID_ADDR, target_id)
+        handler.write1ByteTxRx(target_id, BAUD_ADDR, BAUD_CODE[TARGET_BAUDRATE])
+        handler.LockEprom(target_id)
+    finally:
+        ph.closePort()
+
+
+def setup_motor(port, motor_id, label, model):
     print(f"\n{'=' * 60}")
     print(f"Setting up: {label} (target ID {motor_id}, model {model})")
     print(f"{'=' * 60}")
     input(f"Connect ONLY this motor to {port}, then press ENTER...")
 
-    print("Scanning for motor (this may take a moment)...")
+    print("Scanning for motor...")
     initial_baudrate, initial_id = find_motor(port, model)
 
-    name = f"motor_{motor_id}"
-    bus = FeetechMotorsBus(
-        port=port,
-        motors={name: Motor(motor_id, model, MotorNormMode.RANGE_M100_100)},
-        protocol_version=protocol_for(model),
-    )
-    try:
-        bus.setup_motor(name, initial_baudrate=initial_baudrate, initial_id=initial_id)
-        print(f"✓ Done: ID={motor_id}, model={model}")
-    finally:
-        if bus.is_connected:
-            bus.disconnect(disable_torque=False)
+    if initial_id == motor_id and initial_baudrate == TARGET_BAUDRATE:
+        print("  Already configured correctly.")
+        return
+
+    configure_motor(port, model, initial_baudrate, initial_id, motor_id)
+    print(f"  Done: ID={motor_id}, baudrate={TARGET_BAUDRATE}")
 
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(description="Configure ATC Feetech motor IDs")
     parser.add_argument("--port", required=True, help="Serial port, e.g. /dev/ttyACM1")
     parser.add_argument(
@@ -118,7 +111,6 @@ def main() -> None:
                         help="Tool motor model for --target all (default: scs0009)")
     args = parser.parse_args()
 
-    # Build steps: (motor_id, label, model)
     steps = []
     if args.target == "atc":
         steps.append((1, "ATC lock mechanism", args.model))
