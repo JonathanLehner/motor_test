@@ -30,16 +30,19 @@ def ping_packet(motor_id):
     return bytes([0xFF, 0xFF] + body + [checksum(body)])
 
 
-def scan_baud(port, baud):
+def scan_baud(port, baud, verbose=False):
     """Open the port fresh at this baud so the rate is guaranteed applied."""
     found = []
     with serial.Serial(port, baud, timeout=0.02) as ser:
+        print(f"      (pyserial reports baudrate={ser.baudrate})")
         for motor_id in range(1, 21):
             pkt = ping_packet(motor_id)
             ser.reset_input_buffer()
             ser.write(pkt)
             time.sleep(0.01)
             rx = ser.read(64)
+            if verbose and motor_id <= 3:
+                print(f"      ID={motor_id} TX={pkt.hex(' ')}  RX={rx.hex(' ') or '<nothing>'}")
             # Strip the echoed request, look for a real response after it.
             resp = rx[len(pkt):] if rx[:len(pkt)] == pkt else rx
             if len(resp) >= 6 and resp[0] == 0xFF and resp[1] == 0xFF and resp[2] == motor_id:
@@ -51,6 +54,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", required=True)
     ap.add_argument("--baud", type=int, help="single baudrate to scan (default: all)")
+    ap.add_argument("--verbose", action="store_true", help="dump raw RX bytes for IDs 1-3")
     args = ap.parse_args()
 
     bauds = [args.baud] if args.baud else BAUDRATES
@@ -59,7 +63,7 @@ def main():
     any_found = False
     for baud in bauds:
         print(f"  trying baud {baud} ...")
-        for motor_id, err, raw in scan_baud(args.port, baud):
+        for motor_id, err, raw in scan_baud(args.port, baud, args.verbose):
             print(f"    FOUND  baud={baud}  ID={motor_id}  err={err:#04x}  resp={raw}")
             any_found = True
 
