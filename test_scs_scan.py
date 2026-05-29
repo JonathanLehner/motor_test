@@ -12,14 +12,14 @@ import argparse
 
 from scservo_sdk.port_handler import PortHandler
 from scservo_sdk.sms_sts import sms_sts
-from scservo_sdk.scscl import SCSCL
+from scservo_sdk.scscl import scscl
 from scservo_sdk.scservo_def import COMM_SUCCESS
 
 BAUDRATES = [1_000_000, 500_000, 250_000, 115_200]
 IDS = range(1, 11)
 CONFIGS = [
     ("STS/SMS", sms_sts),
-    ("SCS",     SCSCL),
+    ("SCS",     scscl),
 ]
 
 
