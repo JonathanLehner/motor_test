@@ -53,7 +53,12 @@ def read_pos(handler, motor_id):
 
 
 def torque(handler, motor_id, enable):
-    handler.write1ByteTxRx(motor_id, TORQUE_ADDR, 1 if enable else 0)
+    result, error = handler.write1ByteTxRx(motor_id, TORQUE_ADDR, 1 if enable else 0)
+    state = "enabled" if enable else "disabled"
+    if result != COMM_SUCCESS:
+        print(f"  Warning: torque {state} failed for ID {motor_id} (result={result}, error={error})")
+    else:
+        print(f"  Torque {state} for ID {motor_id}")
 
 
 def record_range(handler, motor_id):
