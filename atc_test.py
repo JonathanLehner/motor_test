@@ -16,8 +16,8 @@ Usage:
   # Interactive: lock/unlock ATC, activate/home tool
   python atc_test.py --port /dev/ttyACM1
 
-  # With 2 tool motors and scs0009 model
-  python atc_test.py --port /dev/ttyACM1 --model scs0009 --motors 2 --calibrate
+  # With 2 tool motors (scs0009)
+  python atc_test.py --port /dev/ttyACM1 --atc-model sts3215 --tool-model scs0009 --motors 2 --calibrate
 """
 
 import argparse
@@ -40,11 +40,7 @@ def protocol_for(model: str) -> int:
 
 
 def make_bus(port: str, motors: dict, model: str) -> FeetechMotorsBus:
-    return FeetechMotorsBus(
-        port=port,
-        motors=motors,
-        protocol_version=protocol_for(model),
-    )
+    return FeetechMotorsBus(port=port, motors=motors, protocol_version=protocol_for(model))
 
 
 def load_calibration() -> dict:
@@ -90,7 +86,7 @@ def record_range(bus: FeetechMotorsBus, name: str) -> tuple[int, int]:
 # Calibration
 # ---------------------------------------------------------------------------
 
-def calibrate_atc(port: str, model: str) -> dict:
+def calibrate_atc(port: str, model: str = "sts3215") -> dict:
     print("\n--- ATC Lock Calibration ---")
     name = "atc_lock"
     bus = make_bus(port, {name: Motor(ATC_MOTOR_ID, model, MotorNormMode.RANGE_M100_100)}, model)
@@ -111,7 +107,7 @@ def calibrate_atc(port: str, model: str) -> dict:
     return {"locked": locked, "unlocked": unlocked}
 
 
-def calibrate_tool(port: str, model: str, num_motors: int) -> dict:
+def calibrate_tool(port: str, model: str = "scs0009", num_motors: int = 1) -> dict:
     print("\n--- Tool Motor Calibration ---")
     motor_map = {
         f"tool_{i + 1}": Motor(TOOL_MOTOR_IDS[i], model, MotorNormMode.RANGE_M100_100)
@@ -138,7 +134,7 @@ def calibrate_tool(port: str, model: str, num_motors: int) -> dict:
 # Interactive mode
 # ---------------------------------------------------------------------------
 
-def interactive(port: str, model: str, num_motors: int) -> None:
+def interactive(port: str, atc_model: str, tool_model: str, num_motors: int) -> None:
     cal = load_calibration()
     if not cal:
         print("No calibration file found. Run with --calibrate first.")
@@ -150,14 +146,21 @@ def interactive(port: str, model: str, num_motors: int) -> None:
     atc_name = "atc_lock"
     tool_names = [f"tool_{i + 1}" for i in range(num_motors)]
 
-    all_motors = {atc_name: Motor(ATC_MOTOR_ID, model, MotorNormMode.RANGE_M100_100)}
-    for i, name in enumerate(tool_names):
-        all_motors[name] = Motor(TOOL_MOTOR_IDS[i], model, MotorNormMode.RANGE_M100_100)
+    # ATC and tool use different protocols — connect on separate buses.
+    atc_bus = make_bus(port, {atc_name: Motor(ATC_MOTOR_ID, atc_model, MotorNormMode.RANGE_M100_100)}, atc_model)
+    tool_bus = make_bus(
+        port,
+        {name: Motor(TOOL_MOTOR_IDS[i], tool_model, MotorNormMode.RANGE_M100_100) for i, name in enumerate(tool_names)},
+        tool_model,
+    ) if tool_names else None
 
-    bus = make_bus(port, all_motors, model)
-    bus.connect(handshake=False)
+    atc_bus.connect(handshake=False)
+    if tool_bus:
+        tool_bus.connect(handshake=False)
     try:
-        bus.enable_torque()
+        atc_bus.enable_torque()
+        if tool_bus:
+            tool_bus.enable_torque()
 
         print("\nCommands:")
         print("  l  =  Lock ATC")
@@ -178,27 +181,33 @@ def interactive(port: str, model: str, num_motors: int) -> None:
                 if "locked" not in atc_cal:
                     print("ATC not calibrated — run with --calibrate first.")
                     continue
-                bus.write("Goal_Position", atc_name, atc_cal["locked"], normalize=False)
+                atc_bus.write("Goal_Position", atc_name, atc_cal["locked"], normalize=False)
                 print(f"  Locking ATC -> position {atc_cal['locked']}")
             elif cmd == "u":
                 if "unlocked" not in atc_cal:
                     print("ATC not calibrated — run with --calibrate first.")
                     continue
-                bus.write("Goal_Position", atc_name, atc_cal["unlocked"], normalize=False)
+                atc_bus.write("Goal_Position", atc_name, atc_cal["unlocked"], normalize=False)
                 print(f"  Unlocking ATC -> position {atc_cal['unlocked']}")
             elif cmd in ("a", "h"):
+                if not tool_bus:
+                    print("  No tool motors configured.")
+                    continue
                 for name in tool_names:
                     if name not in tool_cal:
                         print(f"  {name} not calibrated — run with --calibrate first.")
                         continue
                     pos = tool_cal[name]["max"] if cmd == "a" else tool_cal[name]["min"]
-                    bus.write("Goal_Position", name, pos, normalize=False)
+                    tool_bus.write("Goal_Position", name, pos, normalize=False)
                     print(f"  {name} -> position {pos}")
             else:
                 print("  Unknown command.")
     finally:
-        bus.disable_torque()
-        bus.disconnect(disable_torque=False)
+        atc_bus.disable_torque()
+        atc_bus.disconnect(disable_torque=False)
+        if tool_bus:
+            tool_bus.disable_torque()
+            tool_bus.disconnect(disable_torque=False)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +217,8 @@ def interactive(port: str, model: str, num_motors: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="ATC motor test and calibration")
     parser.add_argument("--port", required=True, help="Serial port, e.g. /dev/ttyACM1")
-    parser.add_argument("--model", default="sts3215", help="Motor model (default: sts3215)")
+    parser.add_argument("--atc-model", default="sts3215", help="ATC motor model (default: sts3215)")
+    parser.add_argument("--tool-model", default="scs0009", help="Tool motor model (default: scs0009)")
     parser.add_argument(
         "--motors",
         type=int,
@@ -225,11 +235,11 @@ def main() -> None:
 
     if args.calibrate:
         cal = load_calibration()
-        cal["atc"] = calibrate_atc(args.port, args.model)
-        cal["tool"] = calibrate_tool(args.port, args.model, args.motors)
+        cal["atc"] = calibrate_atc(args.port, args.atc_model)
+        cal["tool"] = calibrate_tool(args.port, args.tool_model, args.motors)
         save_calibration(cal)
     else:
-        interactive(args.port, args.model, args.motors)
+        interactive(args.port, args.atc_model, args.tool_model, args.motors)
 
 
 if __name__ == "__main__":

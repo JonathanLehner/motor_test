@@ -3,29 +3,18 @@
 Setup script for Feetech motors in an Automatic Tool Changer (ATC).
 
 Motor ID assignment:
-  1 = ATC lock mechanism
-  2 = Tool motor (first / only motor in a tool)
-  3 = Tool motor (second motor, only for tools with 2 motors)
+  1 = ATC lock mechanism  (STS-series motor, e.g. sts3215)
+  2 = Tool motor 1        (SCS-series motor, e.g. scs0009)
+  3 = Tool motor 2        (SCS-series motor, optional)
 
-All motors are expected to be at their factory default ID (1) and some baudrate.
+All motors are expected to be at their factory default ID and baudrate.
 The script scans, finds the motor, then writes the target ID and 1 Mbps baudrate.
 
 Usage:
-  # Configure the ATC lock motor
-  python atc_setup.py --port /dev/tty.usbmodem... --target atc
-
-  # Configure a tool with 1 motor
-  python atc_setup.py --port /dev/tty.usbmodem... --target tool
-
-  # Configure a tool with 2 motors
-  python atc_setup.py --port /dev/tty.usbmodem... --target tool --motors 2
-
-  # Configure ATC + tool (1 or 2 motors) in one go
-  python atc_setup.py --port /dev/tty.usbmodem... --target all
-  python atc_setup.py --port /dev/tty.usbmodem... --target all --motors 2
-
-  # Use a different motor model (default: sts3215)
-  python atc_setup.py --port /dev/tty.usbmodem... --target atc --model scs0009
+  python atc_setup.py --port /dev/ttyACM1 --target atc
+  python atc_setup.py --port /dev/ttyACM1 --target tool --model scs0009
+  python atc_setup.py --port /dev/ttyACM1 --target tool --model scs0009 --motors 2
+  python atc_setup.py --port /dev/ttyACM1 --target all --atc-model sts3215 --tool-model scs0009
 """
 
 import argparse
@@ -33,11 +22,8 @@ import argparse
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
-# SCS series uses protocol 1; STS/SMS series uses protocol 0
 SCS_MODELS = {"scs0009"}
 SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 115_200, 57_600, 19_200]
-# Factory-default IDs to probe — fresh motors typically ship at ID 1
-FACTORY_IDS = list(range(1, 21))
 
 
 def protocol_for(model: str) -> int:
@@ -45,32 +31,40 @@ def protocol_for(model: str) -> int:
 
 
 def find_motor(port: str, model: str) -> tuple[int, int]:
-    """Scan all common baudrates and IDs. Return (baudrate, motor_id)."""
+    """Locate the single connected motor. Returns (baudrate, motor_id)."""
+    protocol = protocol_for(model)
     bus = FeetechMotorsBus(
         port=port,
         motors={"probe": Motor(1, model, MotorNormMode.RANGE_M100_100)},
-        protocol_version=protocol_for(model),
+        protocol_version=protocol,
     )
     bus.connect(handshake=False)
-    found = []
     try:
         for baudrate in SCAN_BAUDRATES:
             bus.set_baudrate(baudrate)
-            for try_id in FACTORY_IDS:
-                if bus.ping(try_id) is not None:
-                    found.append((baudrate, try_id))
+            if protocol == 0:
+                result = bus.broadcast_ping()
+                if result:
+                    if len(result) > 1:
+                        raise RuntimeError(
+                            f"Found {len(result)} motors: {list(result.keys())}. "
+                            "Connect ONLY the motor you want to configure."
+                        )
+                    motor_id = next(iter(result))
+                    print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
+                    return baudrate, motor_id
+            else:
+                # Protocol 1 (SCS) does not support broadcast ping.
+                for try_id in range(0, 20):
+                    if bus.ping(try_id) is not None:
+                        print(f"  Found motor: ID={try_id} at baudrate={baudrate}")
+                        return baudrate, try_id
     finally:
         bus.disconnect(disable_torque=False)
-
-    if not found:
-        raise RuntimeError("No motor found. Check the connection and power.")
-    if len(found) > 1:
-        raise RuntimeError(
-            f"Found {len(found)} motors: {found}. Connect ONLY the motor you want to configure."
-        )
-    baudrate, motor_id = found[0]
-    print(f"  Found motor: ID={motor_id} at baudrate={baudrate}")
-    return baudrate, motor_id
+    raise RuntimeError(
+        f"No motor found for model '{model}' (protocol {protocol}). "
+        "Check the connection, power, and that only one motor is connected."
+    )
 
 
 def setup_motor(port: str, motor_id: int, label: str, model: str) -> None:
@@ -98,7 +92,7 @@ def setup_motor(port: str, motor_id: int, label: str, model: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Configure ATC Feetech motor IDs")
-    parser.add_argument("--port", required=True, help="Serial port, e.g. /dev/tty.usbmodem...")
+    parser.add_argument("--port", required=True, help="Serial port, e.g. /dev/ttyACM1")
     parser.add_argument(
         "--target",
         required=True,
@@ -110,35 +104,41 @@ def main() -> None:
         type=int,
         choices=[1, 2],
         default=1,
-        help="Number of motors in the tool (default: 1). Only relevant for --target tool or all.",
+        help="Number of tool motors (default: 1). Only relevant for --target tool or all.",
     )
-    parser.add_argument(
-        "--model",
-        default="sts3215",
-        help="Feetech motor model (default: sts3215). Use scs0009 for SCS series.",
-    )
+    parser.add_argument("--model", default="sts3215",
+                        help="Motor model for --target atc or tool (default: sts3215)")
+    parser.add_argument("--atc-model", default="sts3215",
+                        help="ATC motor model for --target all (default: sts3215)")
+    parser.add_argument("--tool-model", default="scs0009",
+                        help="Tool motor model for --target all (default: scs0009)")
     args = parser.parse_args()
 
+    # Build steps: (motor_id, label, model)
     steps = []
-    if args.target in ("atc", "all"):
-        steps.append((1, "ATC lock mechanism"))
-    if args.target in ("tool", "all"):
-        steps.append((2, "Tool motor 1"))
+    if args.target == "atc":
+        steps.append((1, "ATC lock mechanism", args.model))
+    elif args.target == "tool":
+        steps.append((2, "Tool motor 1", args.model))
         if args.motors == 2:
-            steps.append((3, "Tool motor 2"))
+            steps.append((3, "Tool motor 2", args.model))
+    elif args.target == "all":
+        steps.append((1, "ATC lock mechanism", args.atc_model))
+        steps.append((2, "Tool motor 1", args.tool_model))
+        if args.motors == 2:
+            steps.append((3, "Tool motor 2", args.tool_model))
 
     print("ATC Motor Setup")
     print(f"Port  : {args.port}")
-    print(f"Model : {args.model}")
     print(f"Steps : {len(steps)}")
 
-    for motor_id, label in steps:
-        setup_motor(args.port, motor_id, label, args.model)
+    for motor_id, label, model in steps:
+        setup_motor(args.port, motor_id, label, model)
 
     print(f"\n{'=' * 60}")
     print("Setup complete:")
-    for motor_id, label in steps:
-        print(f"  {label:25s} -> ID {motor_id}")
+    for motor_id, label, model in steps:
+        print(f"  {label:25s} -> ID {motor_id}  ({model})")
 
 
 if __name__ == "__main__":

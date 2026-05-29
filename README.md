@@ -183,17 +183,17 @@ pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all
 pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all --motors 2
 ```
 
-The default motor model is `sts3215`. For SCS-series motors (e.g. `scs0009`) add `--model scs0009`:
+The ATC lock motor is STS-series (protocol 0, uses broadcast ping). Tool motors are SCS-series (protocol 1, uses sequential ping). Defaults match this:
 
 ```bash
-# Configure ATC lock (scs0009)
-pipenv run python atc_setup.py --port /dev/ttyACM1 --target atc --model scs0009
+# Configure ATC lock (sts3215, protocol 0)
+pipenv run python atc_setup.py --port /dev/ttyACM1 --target atc
 
-# Configure a tool with 1 motor (scs0009)
+# Configure a tool with 1 scs0009 motor
 pipenv run python atc_setup.py --port /dev/ttyACM1 --target tool --model scs0009
 
-# Configure ATC + tool (2 motors, scs0009)
-pipenv run python atc_setup.py --port /dev/ttyACM1 --target all --motors 2 --model scs0009
+# Configure ATC + tool in one go (uses defaults: atc=sts3215, tool=scs0009)
+pipenv run python atc_setup.py --port /dev/ttyACM1 --target all
 ```
 
 ### 6. Test and calibrate ATC motors
@@ -203,11 +203,11 @@ pipenv run python atc_setup.py --port /dev/ttyACM1 --target all --motors 2 --mod
 **Calibration** (`--calibrate`): records the ATC lock/unlock positions and the tool motor range of motion. Results are saved to `atc_calibration.json`.
 
 ```bash
-# Calibrate ATC + tool (1 motor)
+# Calibrate ATC + tool (defaults: atc=sts3215, tool=scs0009)
 pipenv run python atc_test.py --port /dev/ttyACM1 --calibrate
 
-# Calibrate with scs0009 and 2 tool motors
-pipenv run python atc_test.py --port /dev/ttyACM1 --model scs0009 --motors 2 --calibrate
+# With 2 tool motors
+pipenv run python atc_test.py --port /dev/ttyACM1 --motors 2 --calibrate
 ```
 
 During calibration you will be prompted to:
