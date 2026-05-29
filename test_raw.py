@@ -30,20 +30,20 @@ def ping_packet(motor_id):
     return bytes([0xFF, 0xFF] + body + [checksum(body)])
 
 
-def scan_baud(ser, baud):
-    ser.baudrate = baud
+def scan_baud(port, baud):
+    """Open the port fresh at this baud so the rate is guaranteed applied."""
     found = []
-    for motor_id in range(1, 21):
-        pkt = ping_packet(motor_id)
-        ser.reset_input_buffer()
-        ser.write(pkt)
-        time.sleep(0.01)
-        rx = ser.read(64)
-        # Strip the echoed request, look for a real response after it.
-        resp = rx[len(pkt):] if rx[:len(pkt)] == pkt else rx
-        if len(resp) >= 6 and resp[0] == 0xFF and resp[1] == 0xFF and resp[2] == motor_id:
-            err = resp[4]
-            found.append((motor_id, err, resp.hex(" ")))
+    with serial.Serial(port, baud, timeout=0.02) as ser:
+        for motor_id in range(1, 21):
+            pkt = ping_packet(motor_id)
+            ser.reset_input_buffer()
+            ser.write(pkt)
+            time.sleep(0.01)
+            rx = ser.read(64)
+            # Strip the echoed request, look for a real response after it.
+            resp = rx[len(pkt):] if rx[:len(pkt)] == pkt else rx
+            if len(resp) >= 6 and resp[0] == 0xFF and resp[1] == 0xFF and resp[2] == motor_id:
+                found.append((motor_id, resp[4], resp.hex(" ")))
     return found
 
 
@@ -54,18 +54,17 @@ def main():
     args = ap.parse_args()
 
     bauds = [args.baud] if args.baud else BAUDRATES
-    ser = serial.Serial(args.port, bauds[0], timeout=0.02)
 
     print(f"Scanning {args.port} (echo-aware)...")
     any_found = False
     for baud in bauds:
-        for motor_id, err, raw in scan_baud(ser, baud):
-            print(f"  baud={baud:>8}  ID={motor_id:>2}  err={err:#04x}  resp={raw}")
+        print(f"  trying baud {baud} ...")
+        for motor_id, err, raw in scan_baud(args.port, baud):
+            print(f"    FOUND  baud={baud}  ID={motor_id}  err={err:#04x}  resp={raw}")
             any_found = True
 
     if not any_found:
         print("No real motor responses found (only echo). Check power/wiring/ID.")
-    ser.close()
 
 
 if __name__ == "__main__":
