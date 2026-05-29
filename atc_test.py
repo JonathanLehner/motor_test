@@ -38,8 +38,7 @@ class EchoFreePortHandler(PortHandler):
     """Discards TX echo on half-duplex RS485 bus before reading the response."""
     def writePort(self, packet):
         result = super().writePort(packet)
-        time.sleep(0.005)
-        self.ser.read(self.ser.in_waiting)  # drain echo bytes
+        self.ser.read(len(packet))  # consume exactly the echoed bytes
         return result
 
 CALIBRATION_FILE = Path("atc_calibration.json")

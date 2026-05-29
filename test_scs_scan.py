@@ -20,8 +20,7 @@ from scservo_sdk.scservo_def import COMM_SUCCESS
 class EchoFreePortHandler(PortHandler):
     def writePort(self, packet):
         result = super().writePort(packet)
-        time.sleep(0.005)
-        self.ser.read(self.ser.in_waiting)
+        self.ser.read(len(packet))  # consume exactly the echoed bytes
         return result
 
 BAUDRATES = [1_000_000, 500_000, 250_000, 115_200]
