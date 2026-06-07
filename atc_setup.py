@@ -4,8 +4,13 @@ Setup script for Feetech motors in an Automatic Tool Changer (ATC).
 
 Motor ID assignment:
   1 = ATC lock mechanism  (STS-series motor, e.g. sts3215)
-  2 = Tool motor 1        (SCS-series motor, e.g. scs0009)
-  3 = Tool motor 2        (SCS-series motor, optional)
+  2 = Tool motor 1        (SCS-series motor, e.g. scs0009, or sts3215)
+  3 = Tool motor 2        (optional)
+
+ID and baudrate assignment is done with LeRobot's FeetechMotorsBus.setup_motor(),
+which scans every baudrate/ID for the single connected motor, then writes the
+target ID and the bus default baudrate (1 Mbps). LeRobot handles the EEPROM
+unlock/lock internally, so the change persists across power cycles.
 
 Usage:
   python atc_setup.py --port /dev/ttyACM1 --target atc
@@ -15,111 +20,16 @@ Usage:
 """
 
 import argparse
-import time
 
-from scservo_sdk.port_handler import PortHandler
-from scservo_sdk.sms_sts import sms_sts
+from lerobot.motors import Motor, MotorNormMode
+from lerobot.motors.feetech import FeetechMotorsBus
 
-
-class EchoFreePortHandler(PortHandler):
-    def openPort(self):
-        result = super().openPort()
-        if result:
-            self.ser.timeout = 0.01
-        return result
-
-    def writePort(self, packet):
-        result = super().writePort(packet)
-        self.ser.read(len(packet))
-        return result
-from scservo_sdk.scscl import scscl
-from scservo_sdk.scservo_def import COMM_SUCCESS
-
-# All Feetech-supported baud codes (0..7)
-SCAN_BAUDRATES = [1_000_000, 500_000, 250_000, 128_000, 115_200, 76_800, 57_600, 38_400]
-TARGET_BAUDRATE = 1_000_000
-BAUD_CODE = {1_000_000: 0, 500_000: 1, 250_000: 2, 115_200: 4, 57_600: 6, 19_200: 7}
-
-ID_ADDR = 5
-BAUD_ADDR = 6
-
+# SC-series motors speak protocol 1; ST/SMS-series (sts3215, ...) speak protocol 0.
 SCS_MODELS = {"scs0009"}
 
 
-def make_handler(port, model):
-    ph = EchoFreePortHandler(port)
-    handler = scscl(ph) if model in SCS_MODELS else sms_sts(ph)
-    return ph, handler
-
-
-def find_motor(port, model):
-    """Scan all baudrates/IDs and return (baudrate, motor_id)."""
-    ph, handler = make_handler(port, model)
-    if not ph.openPort():
-        raise RuntimeError(f"Cannot open port {port}")
-    try:
-        for baudrate in SCAN_BAUDRATES:
-            ph.setBaudRate(baudrate)
-            for try_id in range(1, 21):
-                ph.clearPort()
-                _, comm, _ = handler.ping(try_id)
-                if comm == COMM_SUCCESS:
-                    ph.clearPort()
-                    actual_id, comm2, _ = handler.read1ByteTxRx(try_id, ID_ADDR)
-                    if comm2 == COMM_SUCCESS and actual_id == try_id:
-                        print(f"  Found motor: ID={try_id} at baudrate={baudrate}")
-                        return baudrate, try_id
-    finally:
-        ph.closePort()
-    raise RuntimeError(
-        "No motor found. Check connection, power, and that only one motor is connected."
-    )
-
-
-def _check(comm, err, what):
-    if comm != COMM_SUCCESS:
-        raise RuntimeError(f"{what} failed (comm={comm}, err={err}). "
-                           f"Motor did not acknowledge the write.")
-
-
-def configure_motor(port, model, initial_baudrate, initial_id, target_id):
-    """Write target ID and 1 Mbps baudrate to a motor.
-
-    EEPROM writes only stick while the lock register is cleared, and the servo
-    needs a short pause to commit each write, so we unlock, write, pause and
-    verify every step instead of firing blind.
-    """
-    ph, handler = make_handler(port, model)
-    if not ph.openPort():
-        raise RuntimeError(f"Cannot open port {port}")
-    ph.setBaudRate(initial_baudrate)
-    try:
-        _check(*handler.unLockEprom(initial_id), "Unlock EEPROM")
-        time.sleep(0.05)
-        _check(*handler.write1ByteTxRx(initial_id, ID_ADDR, target_id), "Write ID")
-        time.sleep(0.05)
-        # ID has changed: from here on the motor answers as target_id.
-        _check(*handler.write1ByteTxRx(target_id, BAUD_ADDR, BAUD_CODE[TARGET_BAUDRATE]),
-               "Write baudrate")
-        time.sleep(0.05)
-        _check(*handler.LockEprom(target_id), "Lock EEPROM")
-        time.sleep(0.05)
-    finally:
-        ph.closePort()
-
-
-def verify_motor(port, model, target_id):
-    """Ping target_id at the target baudrate; return True if it answers."""
-    ph, handler = make_handler(port, model)
-    if not ph.openPort():
-        raise RuntimeError(f"Cannot open port {port}")
-    ph.setBaudRate(TARGET_BAUDRATE)
-    try:
-        ph.clearPort()
-        _, comm, _ = handler.ping(target_id)
-        return comm == COMM_SUCCESS
-    finally:
-        ph.closePort()
+def protocol_for(model):
+    return 1 if model in SCS_MODELS else 0
 
 
 def setup_motor(port, motor_id, label, model):
@@ -128,22 +38,20 @@ def setup_motor(port, motor_id, label, model):
     print(f"{'=' * 60}")
     input(f"Connect ONLY this motor to {port}, then press ENTER...")
 
-    print("Scanning for motor...")
-    initial_baudrate, initial_id = find_motor(port, model)
-
-    if initial_id == motor_id and initial_baudrate == TARGET_BAUDRATE:
-        print("  Already configured correctly.")
-        return
-
-    configure_motor(port, model, initial_baudrate, initial_id, motor_id)
-
-    # Confirm the change actually persisted instead of trusting the writes.
-    if not verify_motor(port, model, motor_id):
-        raise RuntimeError(
-            f"Configuration did not stick: no motor answers at ID {motor_id}, "
-            f"baudrate {TARGET_BAUDRATE}. Check power and wiring, then retry."
-        )
-    print(f"  Done: ID={motor_id}, baudrate={TARGET_BAUDRATE} (verified)")
+    # The motor key is arbitrary; its configured id is the TARGET id that
+    # setup_motor() will write to whatever motor it discovers on the bus.
+    bus = FeetechMotorsBus(
+        port=port,
+        motors={"motor": Motor(id=motor_id, model=model, norm_mode=MotorNormMode.RANGE_M100_100)},
+        protocol_version=protocol_for(model),
+    )
+    bus.connect(handshake=False)
+    try:
+        print("Scanning for motor...")
+        bus.setup_motor("motor")
+        print(f"  Done: ID={motor_id} set, baudrate programmed to bus default (1 Mbps)")
+    finally:
+        bus.disconnect()
 
 
 def main():
