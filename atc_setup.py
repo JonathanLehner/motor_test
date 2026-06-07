@@ -76,17 +76,48 @@ def find_motor(port, model):
     )
 
 
+def _check(comm, err, what):
+    if comm != COMM_SUCCESS:
+        raise RuntimeError(f"{what} failed (comm={comm}, err={err}). "
+                           f"Motor did not acknowledge the write.")
+
+
 def configure_motor(port, model, initial_baudrate, initial_id, target_id):
-    """Write target ID and 1 Mbps baudrate to a motor."""
+    """Write target ID and 1 Mbps baudrate to a motor.
+
+    EEPROM writes only stick while the lock register is cleared, and the servo
+    needs a short pause to commit each write, so we unlock, write, pause and
+    verify every step instead of firing blind.
+    """
     ph, handler = make_handler(port, model)
     if not ph.openPort():
         raise RuntimeError(f"Cannot open port {port}")
     ph.setBaudRate(initial_baudrate)
     try:
-        handler.unLockEprom(initial_id)
-        handler.write1ByteTxRx(initial_id, ID_ADDR, target_id)
-        handler.write1ByteTxRx(target_id, BAUD_ADDR, BAUD_CODE[TARGET_BAUDRATE])
-        handler.LockEprom(target_id)
+        _check(*handler.unLockEprom(initial_id), "Unlock EEPROM")
+        time.sleep(0.05)
+        _check(*handler.write1ByteTxRx(initial_id, ID_ADDR, target_id), "Write ID")
+        time.sleep(0.05)
+        # ID has changed: from here on the motor answers as target_id.
+        _check(*handler.write1ByteTxRx(target_id, BAUD_ADDR, BAUD_CODE[TARGET_BAUDRATE]),
+               "Write baudrate")
+        time.sleep(0.05)
+        _check(*handler.LockEprom(target_id), "Lock EEPROM")
+        time.sleep(0.05)
+    finally:
+        ph.closePort()
+
+
+def verify_motor(port, model, target_id):
+    """Ping target_id at the target baudrate; return True if it answers."""
+    ph, handler = make_handler(port, model)
+    if not ph.openPort():
+        raise RuntimeError(f"Cannot open port {port}")
+    ph.setBaudRate(TARGET_BAUDRATE)
+    try:
+        ph.clearPort()
+        _, comm, _ = handler.ping(target_id)
+        return comm == COMM_SUCCESS
     finally:
         ph.closePort()
 
@@ -105,7 +136,14 @@ def setup_motor(port, motor_id, label, model):
         return
 
     configure_motor(port, model, initial_baudrate, initial_id, motor_id)
-    print(f"  Done: ID={motor_id}, baudrate={TARGET_BAUDRATE}")
+
+    # Confirm the change actually persisted instead of trusting the writes.
+    if not verify_motor(port, model, motor_id):
+        raise RuntimeError(
+            f"Configuration did not stick: no motor answers at ID {motor_id}, "
+            f"baudrate {TARGET_BAUDRATE}. Check power and wiring, then retry."
+        )
+    print(f"  Done: ID={motor_id}, baudrate={TARGET_BAUDRATE} (verified)")
 
 
 def main():
