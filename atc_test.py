@@ -24,6 +24,7 @@ CALIBRATION_FILE = Path("atc_calibration.json")
 ATC_ID = 1
 TOOL_IDS = [2, 3]
 SCRIPT_VERSION = "2026-06-07-lerobot"
+MOVE_SETTLE_S = 0.8
 
 
 def protocol_for(model):
@@ -94,6 +95,15 @@ def torque(bus, name, enable):
 
 def move(bus, name, pos):
     write(bus, "Goal_Position", name, int(pos), normalize=False)
+
+
+def move_and_report(bus, name, pos):
+    before = read_pos(bus, name)
+    move(bus, name, pos)
+    time.sleep(MOVE_SETTLE_S)
+    after = read_pos(bus, name)
+    print(f"  {name}: target={pos}  before={before}  after={after}")
+    return before, after
 
 
 def record_range(bus, name, motor_id):
@@ -205,6 +215,7 @@ def interactive(port, atc_model, tool_name):
     print("  u  =  Unlock ATC")
     print("  a  =  Activate tool  (move to range max)")
     print("  h  =  Home tool      (move to range min)")
+    print("  p  =  Print positions")
     print("  q  =  Quit")
 
     while True:
@@ -221,28 +232,26 @@ def interactive(port, atc_model, tool_name):
                 continue
             def lock_atc(bus):
                 torque(bus, "atc", True)
-                move(bus, "atc", atc_cal["locked"])
+                move_and_report(bus, "atc", atc_cal["locked"])
 
             run_motor_action(
                 port,
                 {"atc": (ATC_ID, atc_model)},
                 lock_atc,
             )
-            print(f"  Locking ATC -> {atc_cal['locked']}")
         elif cmd == "u":
             if "unlocked" not in atc_cal:
                 print("ATC not calibrated.")
                 continue
             def unlock_atc(bus):
                 torque(bus, "atc", True)
-                move(bus, "atc", atc_cal["unlocked"])
+                move_and_report(bus, "atc", atc_cal["unlocked"])
 
             run_motor_action(
                 port,
                 {"atc": (ATC_ID, atc_model)},
                 unlock_atc,
             )
-            print(f"  Unlocking ATC -> {atc_cal['unlocked']}")
         elif cmd in ("a", "h"):
             if not tool_specs:
                 print("  No tool motors configured.")
@@ -255,10 +264,22 @@ def interactive(port, atc_model, tool_name):
                         continue
                     torque(bus, name, True)
                     pos = tool_cal[name]["max"] if cmd == "a" else tool_cal[name]["min"]
-                    move(bus, name, pos)
-                    print(f"  {name} -> {pos}")
+                    move_and_report(bus, name, pos)
 
             run_motor_action(port, tool_specs, action)
+        elif cmd == "p":
+            if atc_cal:
+                run_motor_action(
+                    port,
+                    {"atc": (ATC_ID, atc_model)},
+                    lambda bus: print(f"  atc position: {read_pos(bus, 'atc')}"),
+                )
+            if tool_specs:
+                def print_tools(bus):
+                    for name in tool_specs:
+                        print(f"  {name} position: {read_pos(bus, name)}")
+
+                run_motor_action(port, tool_specs, print_tools)
         else:
             print("  Unknown command.")
 
