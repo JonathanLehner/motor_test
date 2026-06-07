@@ -2,7 +2,7 @@
 
 This directory contains a small set of Python scripts for testing Feetech motor communication, scanning for motors, driving a single motor, repeatedly opening and closing a gripper, and configuring/calibrating the motors of an Automatic Tool Changer (ATC).
 
-`atc_setup.py` and the LeRobot test scripts use LeRobot's Feetech motor bus and require `feetech-servo-sdk` (imported as `scservo_sdk`). `atc_test.py` and `test_scs_scan.py` use the standalone Feetech SDK, `ftservo-python-sdk`, which also imports as `scservo_sdk`. These two SDK packages conflict with each other, so use one environment per SDK.
+`atc_setup.py` uses `feetech-servo-sdk` directly (imported as `scservo_sdk`). The LeRobot test scripts also require `feetech-servo-sdk`. `atc_test.py` and `test_scs_scan.py` use the standalone Feetech SDK, `ftservo-python-sdk`, which also imports as `scservo_sdk`. These two SDK packages conflict with each other, so use one environment per SDK.
 
 For the Chinese version of this guide, see [README.zh.md](/Users/jonathanlehner/wundercode/robotics/motor_test/README.zh.md).
 
@@ -83,7 +83,7 @@ pip install ftservo-python-sdk
 
 | Package | Provides | Used by |
 |---|---|---|
-| `feetech-servo-sdk` | `PacketHandler` | `atc_setup.py`, LeRobot scripts, `test_motor_scan.py`, `test_single_motor.py`, `test_open_close.py` |
+| `feetech-servo-sdk` | `PacketHandler`, `PortHandler` | `atc_setup.py`, LeRobot scripts, `test_motor_scan.py`, `test_single_motor.py`, `test_open_close.py` |
 | `ftservo-python-sdk` | `sms_sts`, `scscl` | `atc_test.py`, `test_scs_scan.py` |
 
 Keeping both sets working at once requires separate virtualenvs, or vendoring one SDK under a private module name.
@@ -257,7 +257,7 @@ pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all
 pipenv run python atc_setup.py --port /dev/tty.usbmodemXXXX --target all --motors 2
 ```
 
-**How it works:** for each motor the script scans every Feetech baud rate, pings IDs 1–20, and verifies a hit by reading the ID register back (so the bus echo can't cause a false match). When it finds the single connected motor it writes the target ID and sets the baud rate to 1 Mbps via the EPROM lock/unlock sequence.
+**How it works:** for each motor the script uses `feetech-servo-sdk` directly, scans every Feetech baud rate, and pings concrete IDs 1–20 only. It does not use broadcast ID 254. The Waveshare bus echo is discarded before reading replies. When it finds exactly one connected motor, it unlocks EEPROM, writes the target ID, sets the baud rate to 1 Mbps, locks EEPROM again, and verifies the target ID at 1 Mbps.
 
 **Motor models.** The default models are `sts3215` for the ATC lock and `scs0009` for the tool, but the tool motor can be either family depending on the tool version. Set it with `--model` (for `--target tool`) or `--tool-model` (for `--target all`):
 
