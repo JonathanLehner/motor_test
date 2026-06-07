@@ -1,136 +1,108 @@
 #!/usr/bin/env python
 """
-Test and calibration script for ATC Feetech motors.
+Test and calibration script for ATC Feetech motors using LeRobot.
 
 Motor IDs:
-  1 = ATC lock mechanism  (sts3215 by default, protocol 0)
-  2 = Tool motor 1        (model depends on the tool: scs0009 or sts3215)
-  3 = Tool motor 2 (optional)
-
-The tool motor model can differ per tool version, so it is selectable with
---tool-model. SC-series models (scs0009) use protocol 1; ST/SMS-series models
-(sts3215) use protocol 0. ATC and tool motors share the same physical bus.
-
-Tool configurations
--------------------
-Different physical tools have different motor models, motor counts and ranges
-of motion. Each tool is stored under a name (--tool NAME), so you can calibrate
-several tools once and switch between them later without re-passing their model
-or motor count. The ATC lock calibration is shared across all tools.
-
-When calibrating, --tool-model and --motors describe the tool being calibrated
-and are saved into that tool's config. In interactive mode the model and motor
-count are loaded from the saved config, so you only need --tool NAME.
-
-Calibration is saved to atc_calibration.json in the current directory with the
-shape:
-
-  {
-    "atc":   {"locked": int, "unlocked": int},
-    "tools": {
-      "<name>": {
-        "model":  "sts3215",
-        "ranges": {"tool_1": {"min": int, "max": int}, ...}
-      }
-    }
-  }
-
-Usage:
-  # Calibrate the ATC lock only (shared by every tool)
-  python atc_test.py --port /dev/ttyACM1 --calibrate atc
-
-  # Calibrate a named tool (model + motor count saved under that name)
-  python atc_test.py --port /dev/ttyACM1 --tool gripper \
-      --tool-model scs0009 --calibrate tool
-
-  # Calibrate a second tool with a different motor model / 2 motors
-  python atc_test.py --port /dev/ttyACM1 --tool welder \
-      --tool-model sts3215 --motors 2 --calibrate tool
-
-  # Calibrate ATC + a tool in one go
-  python atc_test.py --port /dev/ttyACM1 --tool gripper \
-      --tool-model sts3215 --calibrate all
-
-  # Interactive control of a previously calibrated tool (model auto-loaded)
-  python atc_test.py --port /dev/ttyACM1 --tool gripper
+  1 = ATC lock mechanism  (sts3215 by default)
+  2 = Tool motor 1        (scs0009 or sts3215)
+  3 = Tool motor 2        (optional)
 """
 
 import argparse
 import json
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from scservo_sdk.port_handler import PortHandler
-from scservo_sdk.sms_sts import sms_sts
-from scservo_sdk.scscl import scscl
-from scservo_sdk.scservo_def import COMM_SUCCESS
-
-
-class EchoFreePortHandler(PortHandler):
-    """Discards TX echo on the half-duplex single-wire bus before reading the response."""
-    def openPort(self):
-        result = super().openPort()
-        if result:
-            self.ser.timeout = 0.01
-        return result
-
-    def writePort(self, packet):
-        result = super().writePort(packet)
-        self.ser.read(len(packet))
-        return result
+from lerobot.motors import Motor, MotorCalibration, MotorNormMode
+from lerobot.motors.feetech import FeetechMotorsBus
 
 
 SCS_MODELS = {"scs0009"}
 CALIBRATION_FILE = Path("atc_calibration.json")
 ATC_ID = 1
 TOOL_IDS = [2, 3]
-TORQUE_ADDR = 40
+SCRIPT_VERSION = "2026-06-07-lerobot"
 
 
-def open_port(port):
-    ph = EchoFreePortHandler(port)
-    if not ph.openPort():
-        raise RuntimeError(f"Cannot open port {port}")
-    ph.setBaudRate(1_000_000)
-    return ph
+def protocol_for(model):
+    return 1 if model in SCS_MODELS else 0
 
 
-def make_handler(ph, model):
-    """Pick the protocol handler for a model. SC-series -> scscl, else sms_sts."""
-    return scscl(ph) if model in SCS_MODELS else sms_sts(ph)
+def default_calibration(motor_id):
+    return MotorCalibration(
+        id=motor_id,
+        drive_mode=0,
+        homing_offset=0,
+        range_min=0,
+        range_max=4095,
+    )
 
 
-def read_pos(handler, motor_id):
-    handler.portHandler.clearPort()
-    pos, comm, _ = handler.ReadPos(motor_id)
-    if comm != COMM_SUCCESS:
-        raise RuntimeError(f"Failed to read position from ID {motor_id}")
-    return int(pos)
+@contextmanager
+def motor_bus(port, specs):
+    """Open a LeRobot bus for motors that share the same Feetech protocol.
+
+    specs is a mapping {name: (motor_id, model)}. Mixed protocol families cannot
+    share one LeRobot bus, so callers should open one bus per family/action.
+    """
+    protocols = {protocol_for(model) for _, model in specs.values()}
+    if len(protocols) != 1:
+        raise ValueError("motor_bus specs must use one protocol family")
+
+    bus = FeetechMotorsBus(
+        port=port,
+        motors={
+            name: Motor(motor_id, model, MotorNormMode.RANGE_M100_100)
+            for name, (motor_id, model) in specs.items()
+        },
+        calibration={
+            name: default_calibration(motor_id)
+            for name, (motor_id, _) in specs.items()
+        },
+        protocol_version=protocols.pop(),
+    )
+    bus.connect(handshake=False)
+    try:
+        yield bus
+    finally:
+        if bus.is_connected:
+            bus.disconnect(disable_torque=False)
 
 
-def move(handler, model, motor_id, pos):
-    if model in SCS_MODELS:
-        handler.WritePos(motor_id, pos, 0, 500)    # scscl: position, time, speed
-    else:
-        handler.WritePosEx(motor_id, pos, 500, 50)  # sms_sts: position, speed, acc
+def read_pos(bus, name):
+    return int(bus.read("Present_Position", name, normalize=False))
 
 
-def torque(handler, motor_id, enable):
-    result, error = handler.write1ByteTxRx(motor_id, TORQUE_ADDR, 1 if enable else 0)
-    if result != COMM_SUCCESS:
+def write(bus, data_name, name, value, normalize=False):
+    try:
+        bus.write(data_name, name, value, normalize=normalize)
+    except ConnectionError as exc:
+        if "There is no status packet" not in str(exc):
+            raise
+        bus.sync_write(data_name, {name: value}, normalize=normalize)
+
+
+def torque(bus, name, enable):
+    try:
+        write(bus, "Torque_Enable", name, 1 if enable else 0, normalize=False)
+    except Exception as exc:
         state = "enable" if enable else "disable"
-        print(f"  Warning: torque {state} failed for ID {motor_id} (result={result}, error={error})")
+        print(f"  Warning: torque {state} failed for {name}: {exc}")
 
 
-def record_range(handler, motor_id):
-    """Poll motor until ENTER is pressed, return (min, max) raw positions."""
+def move(bus, name, pos):
+    write(bus, "Goal_Position", name, int(pos), normalize=False)
+
+
+def record_range(bus, name, motor_id):
     state = {"min": None, "max": None, "running": True, "reads": 0, "last_err": None}
 
     def poll():
         while state["running"]:
             try:
-                pos = read_pos(handler, motor_id)
+                pos = read_pos(bus, name)
                 state["reads"] += 1
                 state["min"] = pos if state["min"] is None else min(state["min"], pos)
                 state["max"] = pos if state["max"] is None else max(state["max"], pos)
@@ -141,11 +113,11 @@ def record_range(handler, motor_id):
             time.sleep(0.1)
         print()
 
-    t = threading.Thread(target=poll, daemon=True)
-    t.start()
+    thread = threading.Thread(target=poll, daemon=True)
+    thread.start()
     input("    Move through the full range of motion, then press ENTER to stop...")
     state["running"] = False
-    t.join(timeout=1.0)
+    thread.join(timeout=1.0)
 
     if state["reads"] == 0:
         raise RuntimeError(
@@ -166,25 +138,17 @@ def save_calibration(data):
     print(f"Calibration saved to {CALIBRATION_FILE}")
 
 
-# ---------------------------------------------------------------------------
-# Calibration
-# ---------------------------------------------------------------------------
-
 def calibrate_atc(port, atc_model):
     print("\n--- ATC Lock Calibration ---")
-    ph = open_port(port)
-    handler = make_handler(ph, atc_model)
-    try:
-        torque(handler, ATC_ID, False)
+    with motor_bus(port, {"atc": (ATC_ID, atc_model)}) as bus:
+        torque(bus, "atc", False)
         input("  Move to the LOCKED position, then press ENTER...")
-        locked = read_pos(handler, ATC_ID)
+        locked = read_pos(bus, "atc")
         print(f"  Locked position: {locked}")
 
         input("  Move to the UNLOCKED position, then press ENTER...")
-        unlocked = read_pos(handler, ATC_ID)
+        unlocked = read_pos(bus, "atc")
         print(f"  Unlocked position: {unlocked}")
-    finally:
-        ph.closePort()
 
     print("  ATC calibration done.")
     return {"locked": locked, "unlocked": unlocked}
@@ -192,28 +156,24 @@ def calibrate_atc(port, atc_model):
 
 def calibrate_tool(port, tool_name, tool_model, num_motors):
     print(f"\n--- Tool Motor Calibration: '{tool_name}' ({tool_model}) ---")
-    ph = open_port(port)
-    handler = make_handler(ph, tool_model)
+    specs = {f"tool_{i + 1}": (TOOL_IDS[i], tool_model) for i in range(num_motors)}
     ranges = {}
-    try:
-        for i in range(num_motors):
-            motor_id = TOOL_IDS[i]
-            name = f"tool_{i + 1}"
-            torque(handler, motor_id, False)
+    with motor_bus(port, specs) as bus:
+        for name, (motor_id, _) in specs.items():
+            torque(bus, name, False)
             print(f"\n  Calibrating {name} (ID {motor_id})...")
-            mn, mx = record_range(handler, motor_id)
+            mn, mx = record_range(bus, name, motor_id)
             print(f"  Range: min={mn}, max={mx}")
             ranges[name] = {"min": mn, "max": mx}
-    finally:
-        ph.closePort()
 
     print("  Tool calibration done.")
     return {"model": tool_model, "ranges": ranges}
 
 
-# ---------------------------------------------------------------------------
-# Interactive mode
-# ---------------------------------------------------------------------------
+def run_motor_action(port, specs, action):
+    with motor_bus(port, specs) as bus:
+        return action(bus)
+
 
 def interactive(port, atc_model, tool_name):
     cal = load_calibration()
@@ -222,8 +182,6 @@ def interactive(port, atc_model, tool_name):
         return
 
     atc_cal = cal.get("atc", {})
-
-    # Tool model and motor count come from the named tool's saved config.
     tool_cfg = cal.get("tools", {}).get(tool_name)
     if tool_cfg:
         tool_model = tool_cfg["model"]
@@ -235,73 +193,75 @@ def interactive(port, atc_model, tool_name):
         tool_model = None
         tool_cal = {}
         num_motors = 0
-    tool_ids = [TOOL_IDS[i] for i in range(num_motors)]
+
+    tool_specs = {
+        f"tool_{i + 1}": (TOOL_IDS[i], tool_model)
+        for i in range(num_motors)
+    } if tool_model else {}
 
     print(f"\nActive tool: '{tool_name}'" + (f" ({tool_model}, {num_motors} motor(s))" if tool_model else " (none)"))
+    print("\nCommands:")
+    print("  l  =  Lock ATC")
+    print("  u  =  Unlock ATC")
+    print("  a  =  Activate tool  (move to range max)")
+    print("  h  =  Home tool      (move to range min)")
+    print("  q  =  Quit")
 
-    # ATC and tool motors are on the same physical bus -> one shared port.
-    ph = open_port(port)
-    atc = make_handler(ph, atc_model)
-    tool = make_handler(ph, tool_model) if num_motors else None
+    while True:
+        try:
+            cmd = input("\n> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
 
-    try:
-        torque(atc, ATC_ID, True)
-        if tool:
-            for tid in tool_ids:
-                torque(tool, tid, True)
+        if cmd == "q":
+            break
+        if cmd == "l":
+            if "locked" not in atc_cal:
+                print("ATC not calibrated.")
+                continue
+            def lock_atc(bus):
+                torque(bus, "atc", True)
+                move(bus, "atc", atc_cal["locked"])
 
-        print("\nCommands:")
-        print("  l  =  Lock ATC")
-        print("  u  =  Unlock ATC")
-        print("  a  =  Activate tool  (move to range max)")
-        print("  h  =  Home tool      (move to range min)")
-        print("  q  =  Quit")
+            run_motor_action(
+                port,
+                {"atc": (ATC_ID, atc_model)},
+                lock_atc,
+            )
+            print(f"  Locking ATC -> {atc_cal['locked']}")
+        elif cmd == "u":
+            if "unlocked" not in atc_cal:
+                print("ATC not calibrated.")
+                continue
+            def unlock_atc(bus):
+                torque(bus, "atc", True)
+                move(bus, "atc", atc_cal["unlocked"])
 
-        while True:
-            try:
-                cmd = input("\n> ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                break
+            run_motor_action(
+                port,
+                {"atc": (ATC_ID, atc_model)},
+                unlock_atc,
+            )
+            print(f"  Unlocking ATC -> {atc_cal['unlocked']}")
+        elif cmd in ("a", "h"):
+            if not tool_specs:
+                print("  No tool motors configured.")
+                continue
 
-            if cmd == "q":
-                break
-            elif cmd == "l":
-                if "locked" not in atc_cal:
-                    print("ATC not calibrated.")
-                    continue
-                move(atc, atc_model, ATC_ID, atc_cal["locked"])
-                print(f"  Locking ATC -> {atc_cal['locked']}")
-            elif cmd == "u":
-                if "unlocked" not in atc_cal:
-                    print("ATC not calibrated.")
-                    continue
-                move(atc, atc_model, ATC_ID, atc_cal["unlocked"])
-                print(f"  Unlocking ATC -> {atc_cal['unlocked']}")
-            elif cmd in ("a", "h"):
-                if not tool:
-                    print("  No tool motors configured.")
-                    continue
-                for i, tid in enumerate(tool_ids):
-                    name = f"tool_{i + 1}"
+            def action(bus):
+                for name in tool_specs:
                     if name not in tool_cal:
                         print(f"  {name} not calibrated.")
                         continue
+                    torque(bus, name, True)
                     pos = tool_cal[name]["max"] if cmd == "a" else tool_cal[name]["min"]
-                    move(tool, tool_model, tid, pos)
+                    move(bus, name, pos)
                     print(f"  {name} -> {pos}")
-            else:
-                print("  Unknown command.")
-    finally:
-        torque(atc, ATC_ID, False)
-        if tool:
-            for tid in tool_ids:
-                torque(tool, tid, False)
-        ph.closePort()
 
+            run_motor_action(port, tool_specs, action)
+        else:
+            print("  Unknown command.")
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="ATC motor test and calibration")
@@ -312,8 +272,7 @@ def main():
                              "stores its own model, motor count and ranges.")
     parser.add_argument("--tool-model", default="scs0009",
                         help="Tool motor model when calibrating: scs0009 or sts3215 "
-                             "(default: scs0009). Ignored in interactive mode (loaded "
-                             "from the tool's saved config).")
+                             "(default: scs0009). Ignored in interactive mode.")
     parser.add_argument(
         "--motors",
         type=int,
@@ -327,6 +286,9 @@ def main():
         help="Calibrate: atc = lock positions only, tool = tool range only, all = both",
     )
     args = parser.parse_args()
+
+    print("ATC Motor Test")
+    print(f"Script: {SCRIPT_VERSION}")
 
     if args.calibrate:
         cal = load_calibration()

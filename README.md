@@ -2,7 +2,7 @@
 
 This directory contains a small set of Python scripts for testing Feetech motor communication, scanning for motors, driving a single motor, repeatedly opening and closing a gripper, and configuring/calibrating the motors of an Automatic Tool Changer (ATC).
 
-`atc_setup.py` and the LeRobot test scripts use LeRobot's Feetech motor bus and require `feetech-servo-sdk` (imported as `scservo_sdk`). `atc_test.py` and `test_scs_scan.py` use the standalone Feetech SDK, `ftservo-python-sdk`, which also imports as `scservo_sdk`. These two SDK packages conflict with each other, so use one environment per SDK.
+`atc_setup.py`, `atc_test.py`, and the LeRobot test scripts use LeRobot's Feetech motor bus and require `feetech-servo-sdk` (imported as `scservo_sdk`). `test_scs_scan.py` uses the standalone Feetech SDK, `ftservo-python-sdk`, which also imports as `scservo_sdk`. These two SDK packages conflict with each other, so use one environment per SDK.
 
 For the Chinese version of this guide, see [README.zh.md](/Users/jonathanlehner/wundercode/robotics/motor_test/README.zh.md).
 
@@ -74,7 +74,7 @@ pip uninstall -y ftservo-python-sdk
 pip install feetech-servo-sdk==1.0.0
 ```
 
-For `atc_test.py` and `test_scs_scan.py`, use **`ftservo-python-sdk`** in a separate environment:
+For `test_scs_scan.py`, use **`ftservo-python-sdk`** in a separate environment:
 
 ```bash
 pip uninstall -y feetech-servo-sdk
@@ -83,8 +83,8 @@ pip install ftservo-python-sdk
 
 | Package | Provides | Used by |
 |---|---|---|
-| `feetech-servo-sdk` | `PacketHandler` | `atc_setup.py`, LeRobot scripts, `test_motor_scan.py`, `test_single_motor.py`, `test_open_close.py` |
-| `ftservo-python-sdk` | `sms_sts`, `scscl` | `atc_test.py`, `test_scs_scan.py` |
+| `feetech-servo-sdk` | `PacketHandler` | `atc_setup.py`, `atc_test.py`, LeRobot scripts, `test_motor_scan.py`, `test_single_motor.py`, `test_open_close.py` |
+| `ftservo-python-sdk` | `sms_sts`, `scscl` | `test_scs_scan.py` |
 
 Keeping both sets working at once requires separate virtualenvs, or vendoring one SDK under a private module name.
 
@@ -277,7 +277,7 @@ python atc_setup.py --port /dev/ttyACM0 --target all --tool-model sts3215
 
 ### 6. Test and calibrate ATC motors
 
-`atc_test.py` has two modes. As with setup, the tool model is selectable (`--tool-model scs0009` default, or `--tool-model sts3215`); the ATC model defaults to `sts3215` (`--atc-model`).
+`atc_test.py` uses LeRobot and has two modes. As with setup, the tool model is selectable (`--tool-model scs0009` default, or `--tool-model sts3215`); the ATC model defaults to `sts3215` (`--atc-model`).
 
 **Named tool configurations.** A single ATC can carry different physical tools, each with its own motor model, motor count and range of motion. Each tool is stored under a name with `--tool NAME` (default: `default`). Calibrate each tool once; afterwards interactive mode loads that tool's model and motor count from the saved config, so you only pass `--tool NAME`. The ATC lock calibration is shared across all tools.
 
@@ -317,7 +317,7 @@ During calibration you are prompted to:
 2. Move the ATC to the unlocked position → press ENTER
 3. Move each tool motor through its full range → the live position is printed as you move it; press ENTER to stop. The min/max seen become the tool's range. If no position is ever read (motor unpowered, wrong ID, or off the bus), calibration aborts with a clear error instead of crashing.
 
-**Interactive mode** (no `--calibrate`): loads the saved calibration and accepts commands. Select which tool to drive with `--tool NAME`; its model and motor count come from the saved config (no need to repass `--tool-model`/`--motors`). The ATC and tool motors share the one bus, so they're driven over a single connection. If the named tool isn't calibrated, ATC-only control is still available.
+**Interactive mode** (no `--calibrate`): loads the saved calibration and accepts commands. Select which tool to drive with `--tool NAME`; its model and motor count come from the saved config (no need to repass `--tool-model`/`--motors`). If the ATC and tool use different Feetech protocol families, the script opens the port for the active motor family per command. If the named tool isn't calibrated, ATC-only control is still available.
 
 ```bash
 # Drive the "gripper" tool
