@@ -20,7 +20,6 @@ Usage:
 """
 
 import argparse
-
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
@@ -51,7 +50,13 @@ def setup_motor(port, motor_id, label, model):
         bus.setup_motor("motor")
         print(f"  Done: ID={motor_id} set, baudrate programmed to bus default (1 Mbps)")
     finally:
-        bus.disconnect()
+        # LeRobot's disconnect() disables torque before closing the port. During
+        # ID setup that cleanup write can fail even after setup_motor() succeeded,
+        # for example when a servo reports a low/input-voltage error.
+        try:
+            bus.disconnect()
+        except Exception as exc:
+            print(f"  Warning: cleanup disconnect failed after setup: {exc}")
 
 
 def main():

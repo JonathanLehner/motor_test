@@ -2,7 +2,7 @@
 
 This directory contains a small set of Python scripts for testing Feetech motor communication, scanning for motors, driving a single motor, repeatedly opening and closing a gripper, and configuring/calibrating the motors of an Automatic Tool Changer (ATC).
 
-The ATC scripts (`atc_setup.py`, `atc_test.py`) and the raw scanners (`test_raw.py`, `test_scs_scan.py`) talk to the servos directly with the Feetech SDK (`ftservo-python-sdk`, imported as `scservo_sdk`) — they do **not** use LeRobot. The remaining `test_*` and `lerobot_*` scripts use LeRobot.
+`atc_setup.py` and the LeRobot test scripts use LeRobot's Feetech motor bus and require `feetech-servo-sdk` (imported as `scservo_sdk`). `atc_test.py` and `test_scs_scan.py` use the standalone Feetech SDK, `ftservo-python-sdk`, which also imports as `scservo_sdk`. These two SDK packages conflict with each other, so use one environment per SDK.
 
 For the Chinese version of this guide, see [README.zh.md](/Users/jonathanlehner/wundercode/robotics/motor_test/README.zh.md).
 
@@ -63,22 +63,38 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
 - A connected serial device
 - A powered Feetech motor / Waveshare controller board
 
-### SDK note: ftservo-python-sdk vs feetech-servo-sdk (conflict)
+### SDK note: feetech-servo-sdk vs ftservo-python-sdk (conflict)
 
-The ATC scripts import `scservo_sdk` and use its high-level `sms_sts` / `scscl` classes. Those classes are provided by **`ftservo-python-sdk`**:
+Two different Feetech SDK packages install a Python module named `scservo_sdk`, but they expose different APIs. Whichever package is installed last wins that module name and breaks scripts that expect the other API.
+
+For `atc_setup.py`, LeRobot scripts, and the default `requirements.txt`, use **`feetech-servo-sdk`**:
 
 ```bash
+pip uninstall -y ftservo-python-sdk
+pip install feetech-servo-sdk==1.0.0
+```
+
+For `atc_test.py` and `test_scs_scan.py`, use **`ftservo-python-sdk`** in a separate environment:
+
+```bash
+pip uninstall -y feetech-servo-sdk
 pip install ftservo-python-sdk
 ```
 
-⚠️ This conflicts with **LeRobot**. Both `ftservo-python-sdk` and `feetech-servo-sdk` (a LeRobot dependency) install a module named `scservo_sdk`, but with different APIs:
-
 | Package | Provides | Used by |
 |---|---|---|
-| `ftservo-python-sdk` | `sms_sts`, `scscl` | `atc_*.py`, `test_raw.py`, `test_scs_scan.py` |
-| `feetech-servo-sdk` | `PacketHandler` | LeRobot (`lerobot_*`, `test_motor_scan.py`, …) |
+| `feetech-servo-sdk` | `PacketHandler` | `atc_setup.py`, LeRobot scripts, `test_motor_scan.py`, `test_single_motor.py`, `test_open_close.py` |
+| `ftservo-python-sdk` | `sms_sts`, `scscl` | `atc_test.py`, `test_scs_scan.py` |
 
-Whichever is installed last wins the `scservo_sdk` namespace and breaks the other. In practice: install `ftservo-python-sdk` to run the ATC scripts; install `feetech-servo-sdk` (or just install LeRobot) to run the LeRobot scripts. Keeping both sets working at once requires separate virtualenvs, or vendoring one SDK under a private module name.
+Keeping both sets working at once requires separate virtualenvs, or vendoring one SDK under a private module name.
+
+To verify that the current environment is ready for `atc_setup.py` and LeRobot:
+
+```bash
+python -c "import scservo_sdk; print(scservo_sdk.__file__); print(hasattr(scservo_sdk, 'PacketHandler'))"
+```
+
+The final line should print `True`.
 
 ## Manual installation
 
