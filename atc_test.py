@@ -11,20 +11,48 @@ The tool motor model can differ per tool version, so it is selectable with
 --tool-model. SC-series models (scs0009) use protocol 1; ST/SMS-series models
 (sts3215) use protocol 0. ATC and tool motors share the same physical bus.
 
-Calibration is saved to atc_calibration.json in the current directory.
+Tool configurations
+-------------------
+Different physical tools have different motor models, motor counts and ranges
+of motion. Each tool is stored under a name (--tool NAME), so you can calibrate
+several tools once and switch between them later without re-passing their model
+or motor count. The ATC lock calibration is shared across all tools.
+
+When calibrating, --tool-model and --motors describe the tool being calibrated
+and are saved into that tool's config. In interactive mode the model and motor
+count are loaded from the saved config, so you only need --tool NAME.
+
+Calibration is saved to atc_calibration.json in the current directory with the
+shape:
+
+  {
+    "atc":   {"locked": int, "unlocked": int},
+    "tools": {
+      "<name>": {
+        "model":  "sts3215",
+        "ranges": {"tool_1": {"min": int, "max": int}, ...}
+      }
+    }
+  }
 
 Usage:
-  # Calibrate ATC lock and tool motors
-  python atc_test.py --port /dev/ttyACM1 --calibrate all
+  # Calibrate the ATC lock only (shared by every tool)
+  python atc_test.py --port /dev/ttyACM1 --calibrate atc
 
-  # Interactive: lock/unlock ATC, activate/home tool
-  python atc_test.py --port /dev/ttyACM1
+  # Calibrate a named tool (model + motor count saved under that name)
+  python atc_test.py --port /dev/ttyACM1 --tool gripper \
+      --tool-model scs0009 --calibrate tool
 
-  # Tool with an sts3215 motor instead of scs0009
-  python atc_test.py --port /dev/ttyACM1 --tool-model sts3215 --calibrate all
+  # Calibrate a second tool with a different motor model / 2 motors
+  python atc_test.py --port /dev/ttyACM1 --tool welder \
+      --tool-model sts3215 --motors 2 --calibrate tool
 
-  # With 2 tool motors
-  python atc_test.py --port /dev/ttyACM1 --motors 2 --calibrate all
+  # Calibrate ATC + a tool in one go
+  python atc_test.py --port /dev/ttyACM1 --tool gripper \
+      --tool-model sts3215 --calibrate all
+
+  # Interactive control of a previously calibrated tool (model auto-loaded)
+  python atc_test.py --port /dev/ttyACM1 --tool gripper
 """
 
 import argparse
@@ -97,17 +125,19 @@ def torque(handler, motor_id, enable):
 
 def record_range(handler, motor_id):
     """Poll motor until ENTER is pressed, return (min, max) raw positions."""
-    state = {"min": float("inf"), "max": float("-inf"), "running": True}
+    state = {"min": None, "max": None, "running": True, "reads": 0, "last_err": None}
 
     def poll():
         while state["running"]:
             try:
                 pos = read_pos(handler, motor_id)
-                state["min"] = min(state["min"], pos)
-                state["max"] = max(state["max"], pos)
-                print(f"\r    pos={pos}  min={int(state['min'])}  max={int(state['max'])}    ", end="", flush=True)
-            except Exception:
-                pass
+                state["reads"] += 1
+                state["min"] = pos if state["min"] is None else min(state["min"], pos)
+                state["max"] = pos if state["max"] is None else max(state["max"], pos)
+                print(f"\r    pos={pos}  min={state['min']}  max={state['max']}    ", end="", flush=True)
+            except Exception as exc:
+                state["last_err"] = exc
+                print(f"\r    read failed: {exc}    ", end="", flush=True)
             time.sleep(0.1)
         print()
 
@@ -116,7 +146,13 @@ def record_range(handler, motor_id):
     input("    Move through the full range of motion, then press ENTER to stop...")
     state["running"] = False
     t.join(timeout=1.0)
-    return int(state["min"]), int(state["max"])
+
+    if state["reads"] == 0:
+        raise RuntimeError(
+            f"No position read from ID {motor_id} (last error: {state['last_err']}). "
+            f"Check the motor is powered, on the bus, and set to ID {motor_id}."
+        )
+    return state["min"], state["max"]
 
 
 def load_calibration():
@@ -154,11 +190,11 @@ def calibrate_atc(port, atc_model):
     return {"locked": locked, "unlocked": unlocked}
 
 
-def calibrate_tool(port, tool_model, num_motors):
-    print("\n--- Tool Motor Calibration ---")
+def calibrate_tool(port, tool_name, tool_model, num_motors):
+    print(f"\n--- Tool Motor Calibration: '{tool_name}' ({tool_model}) ---")
     ph = open_port(port)
     handler = make_handler(ph, tool_model)
-    result = {}
+    ranges = {}
     try:
         for i in range(num_motors):
             motor_id = TOOL_IDS[i]
@@ -167,27 +203,41 @@ def calibrate_tool(port, tool_model, num_motors):
             print(f"\n  Calibrating {name} (ID {motor_id})...")
             mn, mx = record_range(handler, motor_id)
             print(f"  Range: min={mn}, max={mx}")
-            result[name] = {"min": mn, "max": mx}
+            ranges[name] = {"min": mn, "max": mx}
     finally:
         ph.closePort()
 
     print("  Tool calibration done.")
-    return result
+    return {"model": tool_model, "ranges": ranges}
 
 
 # ---------------------------------------------------------------------------
 # Interactive mode
 # ---------------------------------------------------------------------------
 
-def interactive(port, atc_model, tool_model, num_motors):
+def interactive(port, atc_model, tool_name):
     cal = load_calibration()
     if not cal:
         print("No calibration file found. Run with --calibrate first.")
         return
 
     atc_cal = cal.get("atc", {})
-    tool_cal = cal.get("tool", {})
+
+    # Tool model and motor count come from the named tool's saved config.
+    tool_cfg = cal.get("tools", {}).get(tool_name)
+    if tool_cfg:
+        tool_model = tool_cfg["model"]
+        tool_cal = tool_cfg["ranges"]
+        num_motors = len(tool_cal)
+    else:
+        print(f"Tool '{tool_name}' is not calibrated. ATC-only control available.")
+        print(f"Calibrate it with: --tool {tool_name} --tool-model MODEL --calibrate tool")
+        tool_model = None
+        tool_cal = {}
+        num_motors = 0
     tool_ids = [TOOL_IDS[i] for i in range(num_motors)]
+
+    print(f"\nActive tool: '{tool_name}'" + (f" ({tool_model}, {num_motors} motor(s))" if tool_model else " (none)"))
 
     # ATC and tool motors are on the same physical bus -> one shared port.
     ph = open_port(port)
@@ -257,14 +307,19 @@ def main():
     parser = argparse.ArgumentParser(description="ATC motor test and calibration")
     parser.add_argument("--port", required=True, help="Serial port, e.g. /dev/ttyACM1")
     parser.add_argument("--atc-model", default="sts3215", help="ATC motor model (default: sts3215)")
+    parser.add_argument("--tool", default="default",
+                        help="Tool configuration name (default: 'default'). Each tool "
+                             "stores its own model, motor count and ranges.")
     parser.add_argument("--tool-model", default="scs0009",
-                        help="Tool motor model: scs0009 or sts3215 (default: scs0009)")
+                        help="Tool motor model when calibrating: scs0009 or sts3215 "
+                             "(default: scs0009). Ignored in interactive mode (loaded "
+                             "from the tool's saved config).")
     parser.add_argument(
         "--motors",
         type=int,
         choices=[1, 2],
         default=1,
-        help="Number of tool motors (default: 1)",
+        help="Number of tool motors when calibrating (default: 1)",
     )
     parser.add_argument(
         "--calibrate",
@@ -278,10 +333,11 @@ def main():
         if args.calibrate in ("atc", "all"):
             cal["atc"] = calibrate_atc(args.port, args.atc_model)
         if args.calibrate in ("tool", "all"):
-            cal["tool"] = calibrate_tool(args.port, args.tool_model, args.motors)
+            cal.setdefault("tools", {})[args.tool] = calibrate_tool(
+                args.port, args.tool, args.tool_model, args.motors)
         save_calibration(cal)
     else:
-        interactive(args.port, args.atc_model, args.tool_model, args.motors)
+        interactive(args.port, args.atc_model, args.tool)
 
 
 if __name__ == "__main__":

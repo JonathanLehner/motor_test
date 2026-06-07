@@ -263,31 +263,49 @@ python atc_setup.py --port /dev/ttyACM0 --target all --tool-model sts3215
 
 `atc_test.py` has two modes. As with setup, the tool model is selectable (`--tool-model scs0009` default, or `--tool-model sts3215`); the ATC model defaults to `sts3215` (`--atc-model`).
 
-**Calibration** (`--calibrate atc|tool|all`): records the ATC lock/unlock positions and the tool motor range of motion. Results are saved to `atc_calibration.json`. The motors' torque is disabled during calibration so you can move them by hand.
+**Named tool configurations.** A single ATC can carry different physical tools, each with its own motor model, motor count and range of motion. Each tool is stored under a name with `--tool NAME` (default: `default`). Calibrate each tool once; afterwards interactive mode loads that tool's model and motor count from the saved config, so you only pass `--tool NAME`. The ATC lock calibration is shared across all tools.
+
+`atc_calibration.json` has this shape:
+
+```json
+{
+  "atc":   {"locked": 1024, "unlocked": 2048},
+  "tools": {
+    "gripper": {"model": "scs0009", "ranges": {"tool_1": {"min": 100, "max": 900}}},
+    "welder":  {"model": "sts3215", "ranges": {"tool_1": {"min": 0, "max": 4095}}}
+  }
+}
+```
+
+**Calibration** (`--calibrate atc|tool|all`): records the ATC lock/unlock positions and the tool motor range of motion. Results are saved to `atc_calibration.json`. The motors' torque is disabled during calibration so you can move them by hand. When calibrating a tool, `--tool-model` and `--motors` describe that tool and are saved into its config.
 
 ```bash
-# Calibrate both ATC and tool (defaults: atc=sts3215, tool=scs0009)
-python atc_test.py --port /dev/ttyACM0 --calibrate all
-
-# Only the ATC lock positions
+# Calibrate the ATC lock only (shared by every tool)
 python atc_test.py --port /dev/ttyACM0 --calibrate atc
 
-# Only the tool, and this tool uses an sts3215 motor
-python atc_test.py --port /dev/ttyACM0 --calibrate tool --tool-model sts3215
+# Calibrate a tool named "gripper" (scs0009 default)
+python atc_test.py --port /dev/ttyACM0 --tool gripper --calibrate tool
+
+# Calibrate a tool named "welder" with an sts3215 motor
+python atc_test.py --port /dev/ttyACM0 --tool welder --tool-model sts3215 --calibrate tool
 
 # Tool with 2 motors
-python atc_test.py --port /dev/ttyACM0 --calibrate all --motors 2
+python atc_test.py --port /dev/ttyACM0 --tool gripper --motors 2 --calibrate tool
+
+# Calibrate ATC + a named tool in one go
+python atc_test.py --port /dev/ttyACM0 --tool welder --tool-model sts3215 --calibrate all
 ```
 
 During calibration you are prompted to:
 1. Move the ATC to the locked position → press ENTER
 2. Move the ATC to the unlocked position → press ENTER
-3. Move each tool motor through its full range → the live position is printed as you move it; press ENTER to stop. The min/max seen become the tool's range.
+3. Move each tool motor through its full range → the live position is printed as you move it; press ENTER to stop. The min/max seen become the tool's range. If no position is ever read (motor unpowered, wrong ID, or off the bus), calibration aborts with a clear error instead of crashing.
 
-**Interactive mode** (no `--calibrate`): loads the saved calibration and accepts commands. The ATC and tool motors share the one bus, so they're driven over a single connection. Match `--atc-model`/`--tool-model`/`--motors` to your setup.
+**Interactive mode** (no `--calibrate`): loads the saved calibration and accepts commands. Select which tool to drive with `--tool NAME`; its model and motor count come from the saved config (no need to repass `--tool-model`/`--motors`). The ATC and tool motors share the one bus, so they're driven over a single connection. If the named tool isn't calibrated, ATC-only control is still available.
 
 ```bash
-python atc_test.py --port /dev/ttyACM0
+# Drive the "gripper" tool
+python atc_test.py --port /dev/ttyACM0 --tool gripper
 ```
 
 | Command | Action |
