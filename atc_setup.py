@@ -25,6 +25,7 @@ from lerobot.motors.feetech import FeetechMotorsBus
 
 # SC-series motors speak protocol 1; ST/SMS-series (sts3215, ...) speak protocol 0.
 SCS_MODELS = {"scs0009"}
+SCRIPT_VERSION = "2026-06-07-no-disconnect-torque"
 
 
 def protocol_for(model):
@@ -50,13 +51,10 @@ def setup_motor(port, motor_id, label, model):
         bus.setup_motor("motor")
         print(f"  Done: ID={motor_id} set, baudrate programmed to bus default (1 Mbps)")
     finally:
-        # LeRobot's disconnect() disables torque before closing the port. During
-        # ID setup that cleanup write can fail even after setup_motor() succeeded,
-        # for example when a servo reports a low/input-voltage error.
-        try:
-            bus.disconnect()
-        except Exception as exc:
-            print(f"  Warning: cleanup disconnect failed after setup: {exc}")
+        # During setup the configured motor ID is the target ID. Do not let
+        # disconnect() send a torque-disable write to that target ID; setup_motor()
+        # is responsible for finding the current ID and writing the new one.
+        bus.disconnect(disable_torque=False)
 
 
 def main():
@@ -97,6 +95,7 @@ def main():
             steps.append((3, "Tool motor 2", args.tool_model))
 
     print("ATC Motor Setup")
+    print(f"Script: {SCRIPT_VERSION}")
     print(f"Port  : {args.port}")
     print(f"Steps : {len(steps)}")
 
