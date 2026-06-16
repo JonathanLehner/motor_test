@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import logging
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
@@ -28,9 +29,52 @@ from lerobot.motors.feetech import FeetechMotorsBus
 SCS_MODELS = {"scs0009"}
 SCRIPT_VERSION = "2026-06-07-lerobot-no-disconnect-torque"
 
+# 0xFE is the Feetech broadcast address. If it shows up as a "found" id, it's the
+# half-duplex adapter echoing its own broadcast frame, not a real motor answering.
+BROADCAST_ID = 254
+
 
 def protocol_for(model):
     return 1 if model in SCS_MODELS else 0
+
+
+def scan_bus(bus):
+    """Ping every baudrate and report real motors clearly.
+
+    Returns a dict {baudrate: {id: model_number}} of real (non-broadcast) motors.
+    LeRobot's broadcast_ping logs a vague 'Some motors found returned an error
+    status' line; we silence its logger during the scan and print our own
+    per-motor report instead.
+    """
+    lerobot_log = logging.getLogger("lerobot.motors.feetech.feetech")
+    prev_level = lerobot_log.level
+    lerobot_log.setLevel(logging.CRITICAL)
+    found = {}
+    saw_broadcast_only = False
+    try:
+        for baudrate in bus.available_baudrates:
+            bus.set_baudrate(baudrate)
+            ids_models = bus.broadcast_ping() or {}
+            real = {i: m for i, m in ids_models.items() if i != BROADCAST_ID}
+            if real:
+                found[baudrate] = real
+            elif ids_models:
+                saw_broadcast_only = True
+    finally:
+        lerobot_log.setLevel(prev_level)
+
+    if found:
+        for baudrate, motors in found.items():
+            for motor_id, model_no in motors.items():
+                print(f"  Found motor: ID={motor_id} model_number={model_no} "
+                      f"baudrate={baudrate}")
+    elif saw_broadcast_only:
+        print("  No real motor responded — only the broadcast address (254) echoed back.")
+        print("  This usually means the motor isn't powered, the data cable is bad,")
+        print("  or the wrong serial port is selected. Check the 7.4-12V motor supply.")
+    else:
+        print("  No motor found on any baudrate.")
+    return found
 
 
 def setup_motor(port, motor_id, label, model):
@@ -49,6 +93,9 @@ def setup_motor(port, motor_id, label, model):
     bus.connect(handshake=False)
     try:
         print("Scanning for motor...")
+        if not scan_bus(bus):
+            print("  Aborting this motor: no real motor to program. Fix the issue above and rerun.")
+            return
         bus.setup_motor("motor")
         print(f"  Done: ID={motor_id} set, baudrate programmed to bus default (1 Mbps)")
     finally:

@@ -1,0 +1,32 @@
+{
+  "tool": {
+    "tool_1": {
+      "min": 568,
+      "max": 568
+    }
+  },
+  "atc": {
+    "locked": 3059,
+    "unlocked": 2764
+  },
+  "tools": {
+    "whisk": {
+      "model": "sts3215",
+      "ranges": {
+        "tool_1": {
+          "min": 3450,
+          "max": 3920
+        }
+      }
+    },
+    "polish_small": {
+      "model": "sts3215",
+      "ranges": {
+        "tool_1": {
+          "min": 1197,
+          "max": 1439
+        }
+      }
+    }
+  }
+}

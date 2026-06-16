@@ -1,0 +1,10 @@
+# RF-DETR pulls in torch/torchvision, supervision, pycocotools, etc.
+rfdetr
+supervision
+opencv-python
+pillow
+
+# NOTE: This machine has an RTX 5060 Ti (Blackwell, sm_120), which needs a
+# recent CUDA build of PyTorch. If `torch.cuda.is_available()` is False after
+# installing the above, install a matching CUDA wheel first, e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
