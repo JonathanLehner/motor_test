@@ -21,6 +21,10 @@ DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 TARGET_CLASS_ID = 1
 TARGET_CLASS_NAME = "cylinder"
 
+# The COCO export defines two categories ("object", "cylinder"); the model must
+# be built with the same count the checkpoint was trained with.
+NUM_CLASSES = 2
+
 # RF-DETR writes several checkpoints; prefer the EMA weights, which usually
 # generalise best, then fall back to the others.
 CHECKPOINT_PREFERENCE = (
@@ -29,6 +33,27 @@ CHECKPOINT_PREFERENCE = (
     "checkpoint_best_total.pth",
     "checkpoint.pth",
 )
+
+
+def silence_load_warnings() -> None:
+    """Quiet the benign, non-actionable logs emitted while loading the model.
+
+    - rf-detr's own logger re-derives ``num_queries`` from the checkpoint and logs
+      a WARNING; the inference is correct, so we drop it to ERROR. rf-detr reads
+      ``LOG_LEVEL`` when it builds the logger at load time, so set it here before
+      ``import rfdetr`` runs.
+    - transformers logs a couple of config / deprecation notices we can't action.
+    """
+    import logging
+
+    os.environ.setdefault("LOG_LEVEL", "ERROR")
+    logging.getLogger("rf-detr").setLevel(logging.ERROR)
+    try:
+        from transformers.utils import logging as hf_logging
+
+        hf_logging.set_verbosity_error()
+    except Exception:  # pragma: no cover - best effort
+        pass
 
 
 def resolve_checkpoint(output_dir: os.PathLike | str = DEFAULT_OUTPUT_DIR) -> Path:

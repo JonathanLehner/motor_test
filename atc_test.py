@@ -24,6 +24,10 @@ CALIBRATION_FILE = Path("atc_calibration.json")
 ATC_ID = 1
 TOOL_IDS = [2, 3]
 SCRIPT_VERSION = "2026-06-07-lerobot"
+<<<<<<< HEAD
+=======
+MOVE_SETTLE_S = 0.8
+>>>>>>> 0abb1f152c5f028ff2f1f01934f3e8df65d75d1d
 
 
 def protocol_for(model):
@@ -96,6 +100,18 @@ def move(bus, name, pos):
     write(bus, "Goal_Position", name, int(pos), normalize=False)
 
 
+<<<<<<< HEAD
+=======
+def move_and_report(bus, name, pos):
+    before = read_pos(bus, name)
+    move(bus, name, pos)
+    time.sleep(MOVE_SETTLE_S)
+    after = read_pos(bus, name)
+    print(f"  {name}: target={pos}  before={before}  after={after}")
+    return before, after
+
+
+>>>>>>> 0abb1f152c5f028ff2f1f01934f3e8df65d75d1d
 def record_range(bus, name, motor_id):
     state = {"min": None, "max": None, "running": True, "reads": 0, "last_err": None}
 
@@ -205,6 +221,10 @@ def interactive(port, atc_model, tool_name):
     print("  u  =  Unlock ATC")
     print("  a  =  Activate tool  (move to range max)")
     print("  h  =  Home tool      (move to range min)")
+<<<<<<< HEAD
+=======
+    print("  p  =  Print positions")
+>>>>>>> 0abb1f152c5f028ff2f1f01934f3e8df65d75d1d
     print("  q  =  Quit")
 
     while True:
@@ -221,28 +241,42 @@ def interactive(port, atc_model, tool_name):
                 continue
             def lock_atc(bus):
                 torque(bus, "atc", True)
+<<<<<<< HEAD
                 move(bus, "atc", atc_cal["locked"])
+=======
+                move_and_report(bus, "atc", atc_cal["locked"])
+>>>>>>> 0abb1f152c5f028ff2f1f01934f3e8df65d75d1d
 
             run_motor_action(
                 port,
                 {"atc": (ATC_ID, atc_model)},
                 lock_atc,
             )
+<<<<<<< HEAD
             print(f"  Locking ATC -> {atc_cal['locked']}")
+=======
+>>>>>>> 0abb1f152c5f028ff2f1f01934f3e8df65d75d1d
         elif cmd == "u":
             if "unlocked" not in atc_cal:
                 print("ATC not calibrated.")
                 continue
             def unlock_atc(bus):
                 torque(bus, "atc", True)
+<<<<<<< HEAD
                 move(bus, "atc", atc_cal["unlocked"])
+=======
+                move_and_report(bus, "atc", atc_cal["unlocked"])
+>>>>>>> 0abb1f152c5f028ff2f1f01934f3e8df65d75d1d
 
             run_motor_action(
                 port,
                 {"atc": (ATC_ID, atc_model)},
                 unlock_atc,
             )
+<<<<<<< HEAD
             print(f"  Unlocking ATC -> {atc_cal['unlocked']}")
+=======
+>>>>>>> 0abb1f152c5f028ff2f1f01934f3e8df65d75d1d
         elif cmd in ("a", "h"):
             if not tool_specs:
                 print("  No tool motors configured.")
@@ -255,10 +289,29 @@ def interactive(port, atc_model, tool_name):
                         continue
                     torque(bus, name, True)
                     pos = tool_cal[name]["max"] if cmd == "a" else tool_cal[name]["min"]
+<<<<<<< HEAD
                     move(bus, name, pos)
                     print(f"  {name} -> {pos}")
 
             run_motor_action(port, tool_specs, action)
+=======
+                    move_and_report(bus, name, pos)
+
+            run_motor_action(port, tool_specs, action)
+        elif cmd == "p":
+            if atc_cal:
+                run_motor_action(
+                    port,
+                    {"atc": (ATC_ID, atc_model)},
+                    lambda bus: print(f"  atc position: {read_pos(bus, 'atc')}"),
+                )
+            if tool_specs:
+                def print_tools(bus):
+                    for name in tool_specs:
+                        print(f"  {name} position: {read_pos(bus, name)}")
+
+                run_motor_action(port, tool_specs, print_tools)
+>>>>>>> 0abb1f152c5f028ff2f1f01934f3e8df65d75d1d
         else:
             print("  Unknown command.")
 

@@ -16,9 +16,11 @@ from pathlib import Path
 from common import (
     DEFAULT_DATASET_DIR,
     DEFAULT_OUTPUT_DIR,
+    NUM_CLASSES,
     TARGET_CLASS_ID,
     TARGET_CLASS_NAME,
     resolve_checkpoint,
+    silence_load_warnings,
 )
 
 
@@ -42,17 +44,36 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    import warnings
+
+    silence_load_warnings()
+
     import cv2
     import numpy as np
     import supervision as sv
+    import torch
     from PIL import Image
     from rfdetr import RFDETRBase, RFDETRLarge
+
+    # optimize_for_inference() traces the model; the resolution/query count are
+    # fixed, so the "treated as a constant" TracerWarning is expected and benign.
+    warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
+    # RFDETRBase is the correct class for this checkpoint's architecture; the
+    # deprecation notice is expected and not actionable here.
+    warnings.filterwarnings("ignore", message=".*RFDETRBase.*deprecated.*")
 
     checkpoint = args.checkpoint or str(resolve_checkpoint(args.output_dir))
     print(f"Loading checkpoint: {checkpoint}")
 
     Model = RFDETRLarge if args.model == "large" else RFDETRBase
-    model = Model(pretrain_weights=checkpoint)
+    model = Model(pretrain_weights=checkpoint, num_classes=NUM_CLASSES)
+
+    # Warm up / optionally fuse the model for faster inference if supported.
+    if hasattr(model, "optimize_for_inference"):
+        try:
+            model.optimize_for_inference()
+        except Exception as exc:  # pragma: no cover - best effort
+            print(f"(optimize_for_inference skipped: {exc})")
 
     split_dir = Path(args.dataset_dir) / args.split
     images = sorted(

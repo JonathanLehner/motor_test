@@ -7,7 +7,7 @@ name = "pypi"
 draccus = "*"
 lerobot = "*"
 pyserial = "*"
-ftservo-python-sdk = "*"
+feetech-servo-sdk = "==1.0.0"
 
 [dev-packages]
 
