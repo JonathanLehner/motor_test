@@ -190,6 +190,10 @@ def write_ids(ctrl, motor_type, current_id: int, current_master: int, new_can_id
             sys.exit(1)
 
         print(f"\nWriting MST_ID / Master ID -> {fmt_id(new_master_id)}")
+        # Drop the value cached by the pre-write read, otherwise
+        # change_motor_param compares the stale value and returns False
+        # before the write ACK can arrive.
+        motor.temp_param_dict.pop(DM_variable.MST_ID, None)
         ok = ctrl.change_motor_param(motor, DM_variable.MST_ID, int(new_master_id))
         print("MST_ID write:", "OK" if ok else "FAILED/NO ACK")
         writes_ok = writes_ok and ok
@@ -206,6 +210,7 @@ def write_ids(ctrl, motor_type, current_id: int, current_master: int, new_can_id
             sys.exit(1)
 
         print(f"\nWriting ESC_ID / CAN_ID -> {fmt_id(new_can_id)}")
+        motor.temp_param_dict.pop(DM_variable.ESC_ID, None)
         ok = ctrl.change_motor_param(motor, DM_variable.ESC_ID, int(new_can_id))
         print("ESC_ID write:", "OK" if ok else "FAILED/NO ACK")
         writes_ok = writes_ok and ok
