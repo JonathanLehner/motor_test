@@ -9,3 +9,4 @@
   confirm the resolution actually sticks (watch for `<-- fell back!`). Pick a
   mode the camera advertises (`v4l2-ctl --list-formats-ext` on Linux) and pass
   it via `--width/--height` to `teleop_trigger_record.py`.
+- get the camera intrinsics / calibrate stereo camera

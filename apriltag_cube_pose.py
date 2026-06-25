@@ -138,41 +138,76 @@ def load_calib(path: Path) -> dict:
 # AprilTag detection + pose
 # --------------------------------------------------------------------------
 
-def make_detector(family: str) -> "cv2.aruco.ArucoDetector":
-    name = "DICT_" + family.upper().replace("TAG", "APRILTAG_") \
-        if not family.upper().startswith("APRILTAG") else "DICT_" + family.upper()
-    # normalise common spellings: tag36h11 -> DICT_APRILTAG_36h11
-    name = {"tag36h11": "DICT_APRILTAG_36h11",
-            "tag25h9":  "DICT_APRILTAG_25h9",
-            "tag16h5":  "DICT_APRILTAG_16h5",
-            "tagstandard41h12": "DICT_APRILTAG_36h11"}.get(family.lower(), name)
-    if not hasattr(cv2.aruco, name):
-        raise SystemExit(f"[error] OpenCV has no aruco dictionary {name!r} for family {family!r}")
-    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, name))
-    # Tuned for the small (~17px) tags in this downscaled 320x240 stereo eye:
-    # a wider adaptive-threshold window finds more tags, subpix sharpens corners.
-    # The big win is upscaling the eye before detection (see detect_eye).
-    params = cv2.aruco.DetectorParameters()
-    params.adaptiveThreshWinSizeMax = 53
-    params.adaptiveThreshWinSizeStep = 10
-    params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-    return cv2.aruco.ArucoDetector(dictionary, params)
+# Two interchangeable AprilTag backends. Both expose .detect(gray, upscale) ->
+# {tag_id: corners(4,2) float32} in ORIGINAL (pre-upscale) pixel coordinates, with
+# corners in aruco order (TL, TR, BR, BL) so pose/triangulation/overlay match.
+
+class ArucoBackend:
+    """OpenCV cv2.aruco tag36h11 detector (the default; no extra dependency)."""
+
+    name = "aruco"
+
+    def __init__(self, family: str):
+        dname = "DICT_" + family.upper().replace("TAG", "APRILTAG_") \
+            if not family.upper().startswith("APRILTAG") else "DICT_" + family.upper()
+        # normalise common spellings: tag36h11 -> DICT_APRILTAG_36h11
+        dname = {"tag36h11": "DICT_APRILTAG_36h11",
+                 "tag25h9":  "DICT_APRILTAG_25h9",
+                 "tag16h5":  "DICT_APRILTAG_16h5",
+                 "tagstandard41h12": "DICT_APRILTAG_36h11"}.get(family.lower(), dname)
+        if not hasattr(cv2.aruco, dname):
+            raise SystemExit(f"[error] OpenCV has no aruco dictionary {dname!r} for family {family!r}")
+        dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dname))
+        # Tuned for the small (~17px) tags in this downscaled 320x240 stereo eye:
+        # a wider adaptive-threshold window finds more tags, subpix sharpens corners.
+        # The big win is upscaling the eye before detection (see .detect).
+        params = cv2.aruco.DetectorParameters()
+        params.adaptiveThreshWinSizeMax = 53
+        params.adaptiveThreshWinSizeStep = 10
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        self._det = cv2.aruco.ArucoDetector(dictionary, params)
+
+    def detect(self, gray, upscale=1):
+        if upscale != 1:
+            gray = cv2.resize(gray, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+        corners, ids, _ = self._det.detectMarkers(gray)
+        out = {}
+        if ids is not None:
+            for c, i in zip(corners, ids.flatten()):
+                out[int(i)] = (c.reshape(4, 2).astype(np.float32) / upscale)
+        return out
 
 
-def detect_eye(detector, gray, upscale=1):
-    """
-    Return {tag_id: corners(4,2) float32} for one eye image. Corners are mapped
-    back to ORIGINAL pixel coordinates so pose/triangulation/overlay stay correct.
-    Upscaling (cubic) before detection roughly doubles the hit rate on small tags.
-    """
-    if upscale != 1:
-        gray = cv2.resize(gray, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
-    corners, ids, _ = detector.detectMarkers(gray)
-    out = {}
-    if ids is not None:
-        for c, i in zip(corners, ids.flatten()):
-            out[int(i)] = (c.reshape(4, 2).astype(np.float32) / upscale)
-    return out
+class PupilBackend:
+    """pupil-apriltags (AprilRobotics C library) detector — often finds tags
+    aruco misses on small/blurred markers."""
+
+    name = "pupil"
+
+    def __init__(self, family: str):
+        try:
+            from pupil_apriltags import Detector
+        except ImportError:
+            raise SystemExit(
+                "[error] backend 'pupil' needs pupil-apriltags: pip install pupil-apriltags")
+        self._det = Detector(families=family, nthreads=4, quad_decimate=1.0,
+                             refine_edges=True, decode_sharpening=0.25)
+
+    def detect(self, gray, upscale=1):
+        if upscale != 1:
+            gray = cv2.resize(gray, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+        gray = np.ascontiguousarray(gray)
+        out = {}
+        for d in self._det.detect(gray):
+            # pupil corners wrap counter-clockwise (BL, BR, TR, TL); reversing
+            # yields aruco's (TL, TR, BR, BL) order.
+            corners = d.corners.astype(np.float32)[::-1].copy() / upscale
+            out[int(d.tag_id)] = corners
+        return out
+
+
+def make_detector(family: str, backend: str = "aruco"):
+    return {"aruco": ArucoBackend, "pupil": PupilBackend}[backend](family)
 
 
 def solvepnp_tag(corners, tag_size, K):
@@ -222,8 +257,8 @@ def process_episode(ep, cam, detector, intr, baseline, tag_size, tag_id, swap_ey
         if swap_eyes:
             left_g, right_g = right_g, left_g
 
-        ldet = detect_eye(detector, left_g, upscale)
-        rdet = detect_eye(detector, right_g, upscale)
+        ldet = detector.detect(left_g, upscale)
+        rdet = detector.detect(right_g, upscale)
 
         # choose tag: explicit id if given, else a tag seen in both eyes, else any in left
         if tag_id is not None:
@@ -275,6 +310,58 @@ def process_episode(ep, cam, detector, intr, baseline, tag_size, tag_id, swap_ey
                     row["stereo_Y"] = float((row["left_cy"] - intr["cy"]) * Z / intr["fy"])
         yield row
     capture.release()
+
+
+# --------------------------------------------------------------------------
+# Backend comparison: how many tags does each detector find?
+# --------------------------------------------------------------------------
+
+def compare_backends(episodes, cams, family, swap_eyes, upscale):
+    """Run both backends over the same frames and report detection counts."""
+    backends = [make_detector(family, "aruco"), make_detector(family, "pupil")]
+    # per backend: total tag detections, eyes (left+right) with >=1 tag, frames seen
+    tags = {b.name: 0 for b in backends}
+    eyes_hit = {b.name: 0 for b in backends}
+    n_frames = 0
+
+    for ep in episodes:
+        cam = cams[ep]
+        path = cam["path"]
+        if not path.exists():
+            continue
+        capture = cv2.VideoCapture(str(path))
+        fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        start = max(0, int(round(cam["from"] * fps)))
+        end = min(total, int(round(cam["to"] * fps))) if cam["to"] > cam["from"] else total
+        if end <= start:
+            end = total
+        capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+        for _ in range(start, end):
+            ok, frame = capture.read()
+            if not ok:
+                break
+            n_frames += 1
+            h, w = frame.shape[:2]
+            half = w // 2
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            left_g, right_g = gray[:, :half], gray[:, half:]
+            if swap_eyes:
+                left_g, right_g = right_g, left_g
+            for b in backends:
+                for eye in (left_g, right_g):
+                    det = b.detect(eye, upscale)
+                    tags[b.name] += len(det)
+                    if det:
+                        eyes_hit[b.name] += 1
+        capture.release()
+
+    n_eyes = n_frames * 2
+    print(f"\n[compare] {n_frames} frames ({n_eyes} eye images) over {len(episodes)} episode(s)")
+    print(f"          {'backend':<8} {'tags':>8} {'eyes_with_tag':>14} {'eye_hit_rate':>13}")
+    for b in backends:
+        rate = (100 * eyes_hit[b.name] / n_eyes) if n_eyes else 0.0
+        print(f"          {b.name:<8} {tags[b.name]:>8} {eyes_hit[b.name]:>14} {rate:>12.1f}%")
 
 
 # --------------------------------------------------------------------------
@@ -337,6 +424,12 @@ def main():
     p.add_argument("--camera", default="observation.images.cam_1",
                    help="external stereo camera feature key")
     p.add_argument("--family", default="tag36h11", help="AprilTag family")
+    p.add_argument("--backend", default="pupil", choices=["aruco", "pupil"],
+                   help="detector backend: 'pupil' (pupil-apriltags C library, default; "
+                        "finds ~40%% more tags here) or 'aruco' (OpenCV)")
+    p.add_argument("--compare", action="store_true",
+                   help="run BOTH backends over the frames and report how many tags "
+                        "each detects, then continue the pose pipeline with --backend")
     p.add_argument("--tag-id", type=int, default=None,
                    help="cube's tag id; if unset, auto-pick a tag seen in both eyes")
     p.add_argument("--tag-size", type=float, default=0.05,
@@ -378,16 +471,21 @@ def main():
             baseline = float(cal["baseline"])
         src = f"loaded from {args.calib}"
 
-    detector = make_detector(args.family)
+    detector = make_detector(args.family, args.backend)
 
     print(f"[info] dataset   : {args.dataset}")
     print(f"[info] camera    : {args.camera}  frame {W}x{H} -> eye {eye_w}x{eye_h}")
+    print(f"[info] backend   : {args.backend}")
     print(f"[info] family    : {args.family}  tag_size={args.tag_size} m  tag_id={args.tag_id}")
     print(f"[info] intrinsics: fx={intr['fx']:.1f} fy={intr['fy']:.1f} "
           f"cx={intr['cx']:.1f} cy={intr['cy']:.1f}  baseline={baseline} m")
     print(f"[info] calib src : {src}")
 
     episodes = sorted(cams) if args.episodes is None else [e for e in args.episodes if e in cams]
+
+    if args.compare:
+        compare_backends(episodes, cams, args.family, args.swap_eyes, args.upscale)
+
     rows = []
     for ep in episodes:
         n0 = len(rows)
