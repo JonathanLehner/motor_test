@@ -30,7 +30,23 @@ def main() -> None:
     p.add_argument("--height", type=int, default=720, help="requested frame height")
     p.add_argument("--no-display", action="store_true",
                    help="just print the resolution and exit (no preview window)")
+    p.add_argument("--list", action="store_true",
+                   help="probe indices 0..9, report which cameras open, then exit")
     args = p.parse_args()
+
+    if args.list:
+        print("Probing camera indices 0..9 ...")
+        found = []
+        for cid in range(10):
+            cap = cv2.VideoCapture(cid)
+            if cap.isOpened() and cap.read()[0]:
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                print(f"  [{cid}] open  default {w}x{h}")
+                found.append(cid)
+            cap.release()
+        print(f"Found {len(found)} camera(s): {found}" if found else "No cameras found.")
+        return
 
     caps = []
     for cid in args.cam_ids:
