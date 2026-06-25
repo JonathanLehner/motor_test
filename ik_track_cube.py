@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd
 
 SIM_REPO = Path("/Users/jonathanlehner/wundercode/robotics/capulabs/simulabs-simulation")
-DEFAULT_SCENE = SIM_REPO / "nova5" / "scene.xml"
+DEFAULT_SCENE = SIM_REPO / "nova5" / "scene_single.xml"
 
 # Nova5 left arm (matches ROBOT_CONFIGS["nova5"] in simulate.py).
 ARM = "left"
@@ -48,9 +48,13 @@ JOINT_NAMES = [f"{ARM}/joint{i}" for i in range(1, 7)]
 EE_SITE = f"{ARM}/gripper"
 # Reachable workspace box for the left arm (from simulate.py random_ws["left"]).
 WORKSPACE = {"x": (-0.30, 0.00), "y": (-0.30, 0.30), "z": (0.20, 0.40)}
-# How camera-frame cube axes map onto robot-base axes (sign, source axis).
-# Camera (OpenCV): x=right, y=down, z=forward(depth). Robot: x=reach, y=left/right, z=up.
-AXIS_MAP = {"x": ("z", +1.0), "y": ("x", +1.0), "z": ("y", -1.0)}
+# How camera-frame cube axes map onto robot-base axes (robot_axis: (source, sign)).
+# cam_1 is TOP-DOWN with the operator at the top reaching down. We render the arm
+# the same way (base at top, reaching down = world +X downward in the image, see
+# render_sim_video azimuth=180). To make the sim gripper move like the cube in
+# cam_1: camera depth (z) -> table height; cube vertical (camera y, the reach
+# direction) -> robot X (reach); cube horizontal (camera x) -> robot Y.
+AXIS_MAP = {"x": ("y", +1.0), "y": ("x", +1.0), "z": ("z", -1.0)}
 
 QPOS_FEATURE = "observation.arm_qpos_ik"
 TARGET_FEATURE = "observation.ee_pose_target"
@@ -122,17 +126,26 @@ def map_to_workspace(xyz: np.ndarray, mp: dict) -> np.ndarray:
 # IK
 # --------------------------------------------------------------------------
 
+# Gripper points down: its approach axis is the EE site's local +Z, so a 180°
+# rotation about world X maps local +Z -> world -Z (down at the table from above).
+DOWN_QUAT_WXYZ = np.array([0.0, 1.0, 0.0, 0.0])
+
+
 class IKSolver:
-    def __init__(self, scene: Path):
+    def __init__(self, scene: Path, orientation_cost: float = 0.5):
         self.model = mujoco.MjModel.from_xml_path(str(scene))
         self.data = mujoco.MjData(self.model)
         mujoco.mj_resetDataKeyframe(self.model, self.data, self.model.key("neutral_pose").id)
         self.config = mink.Configuration(self.model)
         self.config.update(self.data.qpos)
         self.neutral_q = self.config.q.copy()
+        self.down_rot = mink.SO3(wxyz=DOWN_QUAT_WXYZ)
 
+        # orientation_cost > 0 keeps the gripper pointing down (matches the real
+        # top-down approach); position_cost dominates so the target is still hit.
         self.task = mink.FrameTask(frame_name=EE_SITE, frame_type="site",
-                                   position_cost=1.0, orientation_cost=0.0, lm_damping=1.0)
+                                   position_cost=1.0, orientation_cost=orientation_cost,
+                                   lm_damping=1.0)
         self.posture = mink.PostureTask(self.model, cost=1e-4)
         self.posture.set_target_from_configuration(self.config)
         self.tasks = [self.task, self.posture]
@@ -148,7 +161,7 @@ class IKSolver:
         """Warm-started IK to a 3D position target -> 6 joint angles (rad).
         Early-stops on convergence, so warm-started frames take ~1-2 iters; the
         high cap only matters for the cold reach to the first target."""
-        T = mink.SE3.from_rotation_and_translation(mink.SO3.identity(), np.asarray(target_pos))
+        T = mink.SE3.from_rotation_and_translation(self.down_rot, np.asarray(target_pos))
         self.task.set_target(T)
         for _ in range(max_iters):
             try:
@@ -202,6 +215,8 @@ def main():
                    help="sidecar parquet (default: <dataset>/ik_track_cube.parquet)")
     p.add_argument("--write-dataset", action="store_true",
                    help=f"also add {QPOS_FEATURE} + {TARGET_FEATURE} to the dataset in place")
+    p.add_argument("--orientation-cost", type=float, default=0.5,
+                   help="weight keeping the gripper pointing down (0 = free orientation)")
     args = p.parse_args()
 
     df = load_cube_sidecar(args.dataset)
@@ -216,7 +231,7 @@ def main():
     print(f"[info] {len(valid)} detected frames; fitting to workspace {WORKSPACE}")
 
     # Pass 2: per-episode interpolate -> map -> IK (warm-started).
-    solver = IKSolver(args.scene)
+    solver = IKSolver(args.scene, orientation_cost=args.orientation_cost)
     qpos_map, target_map, rows = {}, {}, []
     for ep in episodes:
         xyz = episode_cube(df, ep)

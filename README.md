@@ -57,6 +57,12 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
 - `test_open_close.py`: repeatedly opens and closes a gripper
 - `lerobot_setup_motors.py`: runs LeRobot motor setup for supported devices
 - `apriltag_cube_pose.py`: estimates the 3D position of an AprilTag-marked cube from the external stereo camera of a LeRobot v3.0 dataset, with two selectable detector backends (`pupil`/`aruco`)
+- `episode_picker.py`: web viewer/clip-splitter for a LeRobot v3.0 dataset; also overlays the detected AprilTag and estimated cube position on the external camera
+- `camera_test.py`: opens the camera(s) for a live preview and reports the resolution they actually deliver (`--list` enumerates indices)
+- `teleop_trigger_record.py`: records the two side-by-side stereo cameras + gripper trigger to a LeRobot v3.0 dataset
+- `ik_track_cube.py`: generates a Nova5 arm trajectory (mink IK) that tracks the cube estimate and bakes it into the dataset (`observation.arm_qpos_ik`, `observation.ee_pose_target`)
+- `ik_replay.py`: replays a generated IK trajectory in the interactive MuJoCo viewer
+- `render_sim_video.py`: renders the IK trajectory to video and adds it to the dataset as a new camera feature (`observation.images.sim`)
 
 ## Requirements
 
@@ -431,6 +437,160 @@ from an assumed per-eye horizontal FOV (`--hfov`) and the baseline is a guess
 (`--baseline`); all metric output is therefore approximate. When you have a real
 calibration, pass `--calib calib.json` with any of `{fx, fy, cx, cy, baseline}`
 to override the estimate — nothing else changes.
+
+## Dataset → IK → simulation pipeline
+
+This pipeline turns a recorded teleop dataset into training data augmented with a
+simulated Nova5 arm that tracks the AprilTag cube. End to end:
+
+```
+record → detect cube → IK trajectory → render sim video → view
+teleop_trigger_record → apriltag_cube_pose → ik_track_cube → render_sim_video → episode_picker / ik_replay
+```
+
+Each step writes back into the LeRobot v3.0 dataset (1:1 by frame index) and/or a
+sidecar parquet next to it. The cube/IK/sim features added are:
+
+| Feature | Shape | Written by | Meaning |
+|---|---|---|---|
+| `observation.cube_position` | `[13]` | `apriltag_cube_pose.py` | stereo XYZ, pnp XYZ, pixel centres, visibility flags (left-eye camera frame) |
+| `observation.arm_qpos_ik` | `[6]` | `ik_track_cube.py` | Nova5 joint angles `joint1..6` (rad) |
+| `observation.ee_pose_target` | `[3]` | `ik_track_cube.py` | the IK target in the robot base frame (m) |
+| `observation.images.sim` | video | `render_sim_video.py` | rendered top-down view of the arm tracking the cube |
+
+### Two environments
+
+The detection/viewer scripts and the IK/simulation scripts need different stacks,
+so there are two virtualenvs:
+
+| venv | Python | Used for | Key packages |
+|---|---|---|---|
+| `.venv` | 3.14 | `apriltag_cube_pose.py`, `episode_picker.py`, `teleop_trigger_record.py`, `camera_test.py` | `opencv-python`, `pandas`, `pyarrow` |
+| `.venv-ik` | 3.12 | `ik_track_cube.py`, `ik_replay.py`, `render_sim_video.py` | `mink`, `mujoco`, `imageio[-ffmpeg]`, `pandas` |
+
+`mink`/`mujoco` do not install on the 3.14 `.venv`, hence the separate `.venv-ik`:
+
+```bash
+uv venv --python 3.12 .venv-ik
+uv pip install --python .venv-ik/bin/python mink mujoco imageio imageio-ffmpeg numpy pandas pyarrow
+```
+
+The Nova5 model comes from the sibling simulation repo
+(`../capulabs/simulabs-simulation`); `ik_track_cube.py`/`ik_replay.py`/`render_sim_video.py`
+default to its `nova5/scene_single.xml` (a single-arm copy of the bimanual
+`nova5/scene.xml`, created so the viewer shows only the driven arm).
+
+### Step 1 — Detect the cube
+
+See [section 8](#8-estimate-apriltag-cube-pose-from-a-dataset). Run with
+`--write-dataset` so `observation.cube_position` is baked in:
+
+```bash
+.venv/bin/python apriltag_cube_pose.py --dataset lerobot_dataset_grasp --tag-id 0 --write-dataset
+```
+
+### Step 2 — View the cube detections (`episode_picker.py`)
+
+`episode_picker.py` serves a web UI that plays each episode's camera videos. When
+an `apriltag_cube_pose.parquet` sidecar is present it overlays, on the external
+camera (`observation.images.cam_1`), the detected tag as a green quad in each eye
+plus the estimated 3D position. It also shows every video feature side by side,
+so once Step 4 has run the `observation.images.sim` view appears to the right of
+`cam_0`/`cam_1` automatically.
+
+```bash
+.venv/bin/python episode_picker.py --dataset lerobot_dataset_grasp
+# open the printed URL
+```
+
+### Step 3 — Generate the IK trajectory (`ik_track_cube.py`)
+
+Reads the cube sidecar, **interpolates** frames with no detection, **auto-fits**
+the cube positions into the Nova5's reachable workspace, and solves mink IK
+(position target + a downward gripper orientation) per frame, warm-started for a
+smooth trajectory. With `--write-dataset` it bakes `observation.arm_qpos_ik` and
+`observation.ee_pose_target` into the dataset and writes an `ik_track_cube.parquet`
+sidecar.
+
+```bash
+.venv-ik/bin/python ik_track_cube.py --dataset lerobot_dataset_grasp --write-dataset
+```
+
+Key options: `--orientation-cost` (default `0.5`; keeps the gripper pointing down,
+`0` = free), `--scene`.
+
+> **Auto-fit is a placeholder, not physically grounded.** There is no
+> camera→robot-base calibration yet, so cube positions are range-mapped into the
+> workspace via `AXIS_MAP`/`WORKSPACE` in `ik_track_cube.py`. The arm tracks the
+> cube's *relative* motion, not its true position. `AXIS_MAP` assumes a **top-down**
+> external camera with the operator at the top: camera depth → table height; the
+> cube's vertical motion (camera y) → the arm's reach axis; cube horizontal
+> (camera x) → sideways. This is paired with the render azimuth (180) so the sim
+> matches cam_1's layout. If an axis looks mirrored, flip its `+1.0`/`-1.0` sign in
+> `AXIS_MAP`. Once the stereo camera is calibrated and its pose relative to the arm
+> base is known, replace the whole auto-fit with that transform.
+
+### Step 4 — Render the sim video (`render_sim_video.py`)
+
+Renders the arm following the IK trajectory (with the red target marker) to one
+mp4 per episode, from a **top-down** viewpoint matching the external camera, and
+registers `observation.images.sim` in `meta/info.json` + `meta/episodes`. Must run
+after Step 3 (it reads `ik_track_cube.parquet`).
+
+```bash
+.venv-ik/bin/python render_sim_video.py --dataset lerobot_dataset_grasp
+```
+
+Viewpoint is tunable with `--azimuth` / `--elevation` / `--distance` (defaults
+`180 / -70 / 1.4` — azimuth 180 puts the arm base at the top of the frame so the
+arm reaches downward like the human operator in cam_1).
+
+### Step 5 — Replay in the interactive viewer (`ik_replay.py`)
+
+Plays an episode's IK trajectory in the live MuJoCo viewer (orbit with the mouse).
+macOS needs `mjpython`:
+
+```bash
+.venv-ik/bin/mjpython ik_replay.py --dataset lerobot_dataset_grasp --episode 27 --loop
+```
+
+### Redo all renders
+
+After changing the IK mapping or orientation, regenerate the IK + sim video for
+every dataset:
+
+```bash
+for ds in lerobot_dataset_grasp lerobot_dataset_clean; do
+  .venv-ik/bin/python ik_track_cube.py    --dataset $ds --write-dataset &&
+  .venv-ik/bin/python render_sim_video.py --dataset $ds
+done
+```
+
+The cube detection (Step 1) is upstream and unaffected by IK/viewpoint changes, so
+it only needs rerunning if the detector or marker assumptions change.
+
+## Stereo camera recording (`teleop_trigger_record.py`)
+
+The rig uses two **side-by-side stereo** USB cameras (one third-person/external,
+one egocentric on the gripper). Each stores as a single frame whose left half is
+the left eye and right half is the right eye.
+
+> **Set the resolution to a real side-by-side mode.** Because both eyes share the
+> frame width, valid modes are *double-width* (e.g. `2560x720` → 1280×720 per eye,
+> `1280x480` → 640×480 per eye) — **not** `640x480`. The recorder sets MJPG (which
+> unlocks the high-res modes on these cameras) and then verifies and uses the
+> resolution the camera actually delivers, warning if it fell back. List a
+> camera's real modes with `v4l2-ctl --list-formats-ext` (Linux), or probe with
+> `camera_test.py`.
+
+```bash
+# List camera indices and the resolution each delivers
+.venv/bin/python camera_test.py --list
+.venv/bin/python camera_test.py --cam-ids 0 2 --no-display
+
+# Record (pick a real side-by-side mode for your camera)
+.venv/bin/python teleop_trigger_record.py --cam-ids 0 2 --width 2560 --height 720
+```
 
 ## Troubleshooting
 
