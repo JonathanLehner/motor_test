@@ -20,10 +20,14 @@ What it does
 
 AprilTag backend
 ----------------
-The AprilRobotics/apriltag C library (https://github.com/AprilRobotics/apriltag)
-is not installed in this environment and does not build cleanly on Python 3.14.
-OpenCV's `cv2.aruco` ships the *same* tag36h11 detector, so we use that — the
-detections are equivalent. No ffmpeg needed; OpenCV decodes the mp4s directly.
+Two interchangeable detectors are available via --backend:
+  * pupil (default): pupil-apriltags, a packaged build of the AprilRobotics
+                     C library (pip install pupil-apriltags). Finds noticeably
+                     more tags on the small, downscaled stereo markers here.
+  * aruco          : OpenCV's cv2.aruco tag36h11 detector — no extra dependency.
+Both feed the identical pose/triangulation pipeline. Pass --compare to run BOTH
+over the frames and print how many tags each detects. No ffmpeg needed; OpenCV
+decodes the mp4s directly.
 
 Calibration
 -----------
@@ -324,7 +328,9 @@ def compare_backends(episodes, cams, family, swap_eyes, upscale):
     eyes_hit = {b.name: 0 for b in backends}
     n_frames = 0
 
-    for ep in episodes:
+    print(f"[compare] scanning {len(episodes)} episode(s) with both backends "
+          f"(aruco + pupil)...")
+    for n, ep in enumerate(episodes, 1):
         cam = cams[ep]
         path = cam["path"]
         if not path.exists():
@@ -337,11 +343,14 @@ def compare_backends(episodes, cams, family, swap_eyes, upscale):
         if end <= start:
             end = total
         capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+        ep_tags = {b.name: 0 for b in backends}
+        ep_frames = 0
         for _ in range(start, end):
             ok, frame = capture.read()
             if not ok:
                 break
             n_frames += 1
+            ep_frames += 1
             h, w = frame.shape[:2]
             half = w // 2
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -352,9 +361,12 @@ def compare_backends(episodes, cams, family, swap_eyes, upscale):
                 for eye in (left_g, right_g):
                     det = b.detect(eye, upscale)
                     tags[b.name] += len(det)
+                    ep_tags[b.name] += len(det)
                     if det:
                         eyes_hit[b.name] += 1
         capture.release()
+        print(f"[compare ep {ep:>3}] {n:>3}/{len(episodes)}  {ep_frames:>5} frames  "
+              f"tags aruco={ep_tags['aruco']:>5} pupil={ep_tags['pupil']:>5}")
 
     n_eyes = n_frames * 2
     print(f"\n[compare] {n_frames} frames ({n_eyes} eye images) over {len(episodes)} episode(s)")

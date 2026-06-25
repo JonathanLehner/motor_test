@@ -56,6 +56,7 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
 - `test_single_motor.py`: controls one motor and provides an interactive position prompt
 - `test_open_close.py`: repeatedly opens and closes a gripper
 - `lerobot_setup_motors.py`: runs LeRobot motor setup for supported devices
+- `apriltag_cube_pose.py`: estimates the 3D position of an AprilTag-marked cube from the external stereo camera of a LeRobot v3.0 dataset, with two selectable detector backends (`pupil`/`aruco`)
 
 ## Requirements
 
@@ -351,6 +352,85 @@ You can also use a `robot` configuration instead of `teleop`. Supported device t
 - `so101_follower`
 - `so101_leader`
 - `lekiwi`
+
+### 8. Estimate AprilTag cube pose from a dataset
+
+`apriltag_cube_pose.py` detects a `tag36h11` AprilTag (the cube marker) in the
+external **stereo** camera of a LeRobot v3.0 dataset and estimates the cube's 3D
+position two ways: stereo triangulation (left/right disparity) and per-eye
+`solvePnP`. Each frame is a side-by-side stereo image (left eye = left half,
+right eye = right half). Results are written to a sidecar parquet, and can
+optionally be baked back into the dataset as an `observation.cube_position`
+feature.
+
+This script needs `opencv-python`, `numpy`, `pandas`, and — for the default
+detector — `pupil-apriltags`:
+
+```bash
+pip install opencv-python numpy pandas pupil-apriltags
+```
+
+```bash
+# Default run: pupil backend, auto-pick a tag seen in both eyes
+python apriltag_cube_pose.py --dataset lerobot_dataset_clean
+
+# Override marker assumptions (50 mm tag, id 0, 60 mm baseline, 70° per-eye FOV)
+python apriltag_cube_pose.py --dataset lerobot_dataset_strawberry \
+  --tag-size 0.05 --tag-id 0 --baseline 0.06 --hfov 70
+
+# Bake the result back into the dataset (in place) and register the feature
+python apriltag_cube_pose.py --dataset lerobot_dataset_clean --write-dataset
+```
+
+#### Detector backends (`--backend`)
+
+Two interchangeable AprilTag detectors are available; both feed the identical
+pose/triangulation pipeline:
+
+| `--backend` | Library | Notes |
+|---|---|---|
+| `pupil` (default) | `pupil-apriltags` (AprilRobotics C library) | Finds noticeably more tags on the small, downscaled stereo markers here |
+| `aruco` | OpenCV `cv2.aruco` | No extra dependency beyond OpenCV |
+
+```bash
+# Use the OpenCV aruco detector instead of the default pupil backend
+python apriltag_cube_pose.py --dataset lerobot_dataset_clean --backend aruco
+```
+
+Because the tags are tiny in the downscaled 320×240 stereo eyes, each eye is
+upscaled (cubic) before detection; tune with `--upscale` (default `3.0`).
+
+#### Comparing the two backends (`--compare`)
+
+`--compare` runs **both** backends over the same frames and prints how many tags
+each detects, then continues the normal pose pipeline using the `--backend`
+selection:
+
+```bash
+python apriltag_cube_pose.py --dataset lerobot_dataset_clean --compare --episodes 0
+```
+
+Example output (episode 0 of `lerobot_dataset_clean`, 5981 frames / 11962 eye
+images, `--upscale 3`):
+
+```
+[compare] 5981 frames (11962 eye images) over 1 episode(s)
+          backend      tags  eyes_with_tag  eye_hit_rate
+          aruco        7026           6310         52.8%
+          pupil        9799           7941         66.4%
+```
+
+Here `pupil` detected ~39% more tags than `aruco`, which is why it is the
+default. Run `python apriltag_cube_pose.py --help` for the full option list
+(camera key, tag family, calibration JSON, episode selection, etc.).
+
+#### Calibration
+
+No camera calibration exists for this rig yet, so intrinsics are **estimated**
+from an assumed per-eye horizontal FOV (`--hfov`) and the baseline is a guess
+(`--baseline`); all metric output is therefore approximate. When you have a real
+calibration, pass `--calib calib.json` with any of `{fx, fy, cx, cy, baseline}`
+to override the estimate — nothing else changes.
 
 ## Troubleshooting
 
