@@ -1,3 +1,5 @@
 lerobot_dataset
 lerobot_dataset_clean
 *.pyc
+.venv/
+.DS_Store
