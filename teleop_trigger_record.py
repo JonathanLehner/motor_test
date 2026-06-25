@@ -56,8 +56,15 @@ from teleop_trigger import (
 
 DEFAULT_CAM_IDS = [0, 2]
 DEFAULT_FPS     = 30
-DEFAULT_WIDTH   = 640
-DEFAULT_HEIGHT  = 480
+# These cameras are side-by-side stereo: the resolution is the COMBINED frame
+# (both eyes share the width), so valid modes are double-width like 2560x720
+# (1280x720 per eye) or 1280x480 (640x480 per eye) — NOT 640x480. The old
+# 640x480 default isn't a real mode, so the camera silently fell back to
+# 640x240 (320x240 per eye). List your camera's modes (e.g. `v4l2-ctl
+# --list-formats-ext`) and set --width/--height to one it actually advertises;
+# whatever the camera really delivers is verified and used (see CameraCapture).
+DEFAULT_WIDTH   = 2560
+DEFAULT_HEIGHT  = 720
 DEFAULT_OUTPUT  = Path("./lerobot_dataset")
 DEFAULT_TASK    = "teleop recording"
 CHUNKS_SIZE     = 1000
@@ -154,14 +161,32 @@ class CameraCapture:
         self._running  = False
         self._caps: list[cv2.VideoCapture] = []
 
+        actual: list[tuple[int, int]] = []
         for cid in cam_ids:
             cap = cv2.VideoCapture(cid)
+            # MJPG unlocks the high-res side-by-side modes on USB stereo cameras;
+            # without it many are stuck in a low-res uncompressed (YUYV) mode.
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             cap.set(cv2.CAP_PROP_FPS, fps)
             if not cap.isOpened():
                 raise RuntimeError(f"Cannot open camera {cid}")
+            aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual.append((aw, ah))
+            if (aw, ah) != (width, height):
+                print(f"[warn] camera {cid}: requested {width}x{height} but got {aw}x{ah} — "
+                      f"camera fell back to a supported mode. Set --width/--height to a "
+                      f"resolution it advertises (stereo modes are side-by-side, e.g. 2560x720).")
             self._caps.append(cap)
+
+        # The writer and dataset metadata use a single resolution, so all cameras
+        # must agree. Use what the cameras ACTUALLY deliver, not what was requested.
+        if len(set(actual)) > 1:
+            raise RuntimeError(f"cameras returned different resolutions {actual}; "
+                               f"set --width/--height to a mode all of them support.")
+        self.width, self.height = actual[0]
 
         self._thread = threading.Thread(target=self._run, daemon=True, name="capture")
 
@@ -483,6 +508,8 @@ def run(
     has_trigger = trigger_thread is not None
 
     capture = CameraCapture(cam_ids, fps, width, height, trigger_thread)
+    # Use the resolution the cameras actually deliver (may differ from requested).
+    width, height = capture.width, capture.height
     dataset = LeRobotDatasetWriter(output, cam_keys, fps, width, height,
                                    has_trigger=has_trigger, task=task)
 
@@ -491,7 +518,8 @@ def run(
     capture.start()
 
     has_display = _check_display()
-    print(f"Cameras {cam_ids} opened at {width}x{height} @ {fps} fps")
+    print(f"Cameras {cam_ids} opened at {width}x{height} (side-by-side: "
+          f"{width // 2}x{height} per eye) @ {fps} fps")
     print(f"Trigger {'enabled' if has_trigger else 'disabled (--no-trigger)'}")
     print(f"Output  → {output.resolve()}")
     print(f"Display → {'window' if has_display else 'headless (keyboard via terminal)'}")

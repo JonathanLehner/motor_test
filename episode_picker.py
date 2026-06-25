@@ -412,6 +412,56 @@ def build_app(dataset: Path):
 
     state = {"clips": clips}
 
+    # Optional AprilTag cube overlay — sidecar written by apriltag_cube_pose.py.
+    cube_path = dataset / "apriltag_cube_pose.parquet"
+    cube_meta_path = dataset / "apriltag_cube_pose.meta.json"
+    cube_state = {"loaded": False, "meta": {}, "by_ep": {}}
+
+    def _clean(v):
+        v = float(v)
+        return None if v != v else round(v, 4)
+
+    def _corners(v):
+        if v is None:
+            return None
+        try:
+            arr = [float(x) for x in v]
+        except TypeError:
+            return None
+        if len(arr) != 8 or any(x != x for x in arr):
+            return None
+        return [round(x, 2) for x in arr]
+
+    def load_cube():
+        if cube_state["loaded"]:
+            return
+        cube_state["loaded"] = True
+        if not cube_path.exists():
+            return
+        try:
+            cube_state["meta"] = (json.loads(cube_meta_path.read_text())
+                                  if cube_meta_path.exists() else {})
+            cdf = pd.read_parquet(cube_path)
+        except Exception as exc:
+            print(f"[warn] could not load cube overlay {cube_path}: {exc}")
+            return
+        has_corners = "left_corners" in cdf.columns and "right_corners" in cdf.columns
+        by_ep = {}
+        for r in cdf.itertuples(index=False):
+            if int(r.tag_id) < 0:
+                continue
+            by_ep.setdefault(int(r.episode_index), []).append([
+                int(r.video_frame),
+                _clean(r.left_cx), _clean(r.left_cy), _clean(r.right_cx), _clean(r.right_cy),
+                _clean(r.stereo_X), _clean(r.stereo_Y), _clean(r.stereo_Z),
+                _clean(r.pnp_left_X), _clean(r.pnp_left_Y), _clean(r.pnp_left_Z),
+                _corners(r.left_corners) if has_corners else None,
+                _corners(r.right_corners) if has_corners else None,
+            ])
+        cube_state["by_ep"] = by_ep
+        print(f"[info] cube overlay: {sum(len(v) for v in by_ep.values())} detections "
+              f"across {len(by_ep)} episode(s) on {cube_state['meta'].get('camera')}")
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -454,6 +504,21 @@ def build_app(dataset: Path):
                 self._send(200, json.dumps({
                     "cameras": cameras, "fps": fps, "episodes": data,
                     "small_threshold": small_threshold,
+                }))
+                return
+
+            if path == "/api/cube":
+                load_cube()
+                q = urllib.parse.parse_qs(parsed.query)
+                try:
+                    ep = int(q["ep"][0])
+                except (KeyError, ValueError):
+                    ep = None
+                m = cube_state["meta"]
+                self._send(200, json.dumps({
+                    "camera": m.get("camera"), "frame_w": m.get("frame_w"),
+                    "frame_h": m.get("frame_h"), "eye_w": m.get("eye_w"),
+                    "dets": cube_state["by_ep"].get(ep, []),
                 }))
                 return
 
@@ -567,8 +632,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
   #viewer h2 { margin: 0 0 4px; font-size: 18px; }
   #viewer .sub { color: var(--mut); font-size: 13px; margin-bottom: 16px; }
   .vids { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
-  .vid { background: #000; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .vid { background: #000; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; position: relative; }
   .vid video { display: block; width: 440px; max-width: 46vw; background: #000; }
+  canvas.cubeov { position: absolute; left: 0; top: 0; pointer-events: none; }
   .vid .cap { padding: 6px 10px; font-size: 12px; color: var(--mut); border-top: 1px solid var(--line); }
   /* timeline */
   .timeline {
@@ -790,6 +856,79 @@ function show(i) {
   };
   renderTimeline(); renderClipList(); renderList();
   document.querySelector('.ep.active')?.scrollIntoView({block:'nearest'});
+  setupCube(e);
+}
+
+// ── AprilTag cube overlay ──────────────────────────────────────────────────
+// Draws the detected tag centre in each eye of the detection camera plus the
+// estimated 3D position, synced to the playhead. No-op if no sidecar exists.
+let CUBE = {map:null, video:null, canvas:null, meta:null, frames:0, raf:0};
+function stopCube() {
+  if (CUBE.raf) { cancelAnimationFrame(CUBE.raf); CUBE.raf = 0; }
+  if (CUBE.canvas) CUBE.canvas.remove();
+  CUBE = {map:null, video:null, canvas:null, meta:null, frames:0, raf:0};
+}
+async function setupCube(e) {
+  stopCube();
+  let d;
+  try { d = await (await fetch('/api/cube?ep=' + e.index)).json(); } catch(_) { return; }
+  if (!d || !d.camera || !d.dets || !d.dets.length) return;
+  const ci = CAMERAS.indexOf(d.camera);
+  const vid = (ci >= 0) ? VIDS[ci] : null;
+  if (!vid) return;
+  const map = new Map();
+  d.dets.forEach(r => map.set(r[0], r));
+  const cv = document.createElement('canvas');
+  cv.className = 'cubeov';
+  vid.parentElement.appendChild(cv);
+  CUBE = {map, video:vid, canvas:cv, meta:d, frames:e.frames, raf:0};
+  loopCube();
+}
+function loopCube() { drawCube(); CUBE.raf = requestAnimationFrame(loopCube); }
+function f3(v) { return (v == null) ? '—' : v.toFixed(3); }
+function drawCube() {
+  const {video, canvas, meta, map, frames} = CUBE;
+  if (!video || !canvas || !meta) return;
+  const W = video.clientWidth, H = video.clientHeight;
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+  if (!(frames > 1)) return;
+  const fr = Math.round(frac() * (frames - 1));
+  let row = map.get(fr);
+  for (let dx = 1; dx <= 3 && !row; dx++) row = map.get(fr - dx) || map.get(fr + dx);
+  if (!row) return;
+  const sx = W / meta.frame_w, sy = H / meta.frame_h, ew = meta.eye_w;
+  ctx.lineWidth = 2; ctx.strokeStyle = '#3fb950'; ctx.font = '12px ui-monospace, monospace';
+  // Draw the tag's 4-corner quad. xoff shifts the right eye into the right half.
+  const quad = (corners, xoff, label) => {
+    if (!corners) return false;
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) {
+      const x = (corners[2*i] + xoff) * sx, y = corners[2*i+1] * sy;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle = '#3fb950';
+    ctx.fillText(label, (corners[0] + xoff) * sx + 4, corners[1] * sy - 5);
+    return true;
+  };
+  const cross = (px, py, label) => {
+    if (px == null || py == null) return;
+    const x = px * sx, y = py * sy;
+    ctx.beginPath();
+    ctx.moveTo(x-12, y); ctx.lineTo(x+12, y); ctx.moveTo(x, y-12); ctx.lineTo(x, y+12); ctx.stroke();
+    ctx.fillStyle = '#3fb950'; ctx.fillText(label, x + 11, y - 11);
+  };
+  // row = [frame, lcx,lcy, rcx,rcy, sX,sY,sZ, pX,pY,pZ, leftCorners, rightCorners]
+  if (!quad(row[11], 0, 'L')) cross(row[1], row[2], 'L');
+  if (!quad(row[12], ew, 'R')) cross(row[3] != null ? ew + row[3] : null, row[4], 'R');
+  let txt = (row[7] != null)
+    ? `cube  stereo XYZ ${f3(row[5])} ${f3(row[6])} ${f3(row[7])} m`
+    : 'cube (single eye)';
+  if (row[10] != null) txt += `   pnp Z ${f3(row[10])} m`;
+  ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(6, 6, Math.min(W-12, 7.2*txt.length + 8), 18);
+  ctx.fillStyle = '#9be9a8'; ctx.fillText(txt, 10, 19);
 }
 
 // Real-time clock length of the current episode (seconds the robot actually
