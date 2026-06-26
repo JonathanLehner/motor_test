@@ -64,6 +64,17 @@ CUBE_NAMES = [
     "left_visible", "right_visible", "stereo_visible",
 ]
 
+# Cube ORIENTATION feature. We compute the full tag orientation (left-eye solvePnP,
+# as a quaternion in the camera frame) AND the in-plane image yaw. Downstream IK
+# uses only `image_yaw` (the tag's rotation in the top-down image plane = table
+# yaw); the full quaternion is stored for completeness / future calibrated use.
+ORIENT_FEATURE = "observation.cube_orientation"
+ORIENT_NAMES = [
+    "image_yaw",                              # tag rotation in the image plane (rad) — used by IK
+    "quat_w", "quat_x", "quat_y", "quat_z",   # full tag orientation, camera frame (left-eye PnP)
+    "orient_visible",                         # 1 if a left-eye orientation was measured
+]
+
 
 # --------------------------------------------------------------------------
 # Dataset scanning (LeRobot v3.0, metadata-driven) — mirrors episode_picker.py
@@ -214,15 +225,42 @@ def make_detector(family: str, backend: str = "aruco"):
     return {"aruco": ArucoBackend, "pupil": PupilBackend}[backend](family)
 
 
-def solvepnp_tag(corners, tag_size, K):
-    """tvec (x,y,z) of the tag centre in the eye's camera frame, metres. None on failure."""
+def solvepnp_pose(corners, tag_size, K):
+    """Full tag pose in the eye's camera frame: (tvec(3) m, rvec(3) axis-angle).
+    None on failure. aruco corner order TL, TR, BR, BL; tag plane at z=0."""
     h = tag_size / 2.0
-    # aruco corner order: TL, TR, BR, BL (image), tag plane at z=0
     obj = np.array([[-h,  h, 0], [h,  h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float32)
     ok, rvec, tvec = cv2.solvePnP(obj, corners, K, None, flags=cv2.SOLVEPNP_IPPE_SQUARE)
     if not ok:
         return None
-    return tvec.reshape(3)
+    return tvec.reshape(3), rvec.reshape(3)
+
+
+def solvepnp_tag(corners, tag_size, K):
+    """tvec (x,y,z) of the tag centre in the eye's camera frame, metres. None on failure."""
+    pose = solvepnp_pose(corners, tag_size, K)
+    return None if pose is None else pose[0]
+
+
+def rvec_to_quat(rvec):
+    """Rodrigues rotation vector -> quaternion (w, x, y, z)."""
+    R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64))
+    w = np.sqrt(max(0.0, 1.0 + R[0, 0] + R[1, 1] + R[2, 2])) / 2.0
+    if w > 1e-8:
+        x = (R[2, 1] - R[1, 2]) / (4 * w)
+        y = (R[0, 2] - R[2, 0]) / (4 * w)
+        z = (R[1, 0] - R[0, 1]) / (4 * w)
+    else:  # near 180° — fall back to the largest-diagonal branch
+        x = np.sqrt(max(0.0, 1.0 + R[0, 0] - R[1, 1] - R[2, 2])) / 2.0
+        y = np.sqrt(max(0.0, 1.0 - R[0, 0] + R[1, 1] - R[2, 2])) / 2.0
+        z = np.sqrt(max(0.0, 1.0 - R[0, 0] - R[1, 1] + R[2, 2])) / 2.0
+    return np.array([w, x, y, z], dtype=np.float64)
+
+
+def image_yaw(corners):
+    """In-plane rotation (rad) of the tag from its top edge (TL->TR) in the image."""
+    d = corners[1] - corners[0]
+    return float(np.arctan2(d[1], d[0]))
 
 
 # --------------------------------------------------------------------------
@@ -282,7 +320,8 @@ def process_episode(ep, cam, detector, intr, baseline, tag_size, tag_id, swap_ey
         for k in ("left_cx", "left_cy", "right_cx", "right_cy", "disparity",
                   "stereo_X", "stereo_Y", "stereo_Z",
                   "pnp_left_X", "pnp_left_Y", "pnp_left_Z",
-                  "pnp_right_X", "pnp_right_Y", "pnp_right_Z"):
+                  "pnp_right_X", "pnp_right_Y", "pnp_right_Z",
+                  "image_yaw", "pnp_qw", "pnp_qx", "pnp_qy", "pnp_qz"):
             row[k] = np.nan
         # 4 tag corners per eye (flattened x0,y0..x3,y3) for the UI overlay; None if unseen
         row["left_corners"] = None
@@ -293,9 +332,13 @@ def process_episode(ep, cam, detector, intr, baseline, tag_size, tag_id, swap_ey
                 lc = ldet[tid].mean(axis=0)
                 row["left_cx"], row["left_cy"] = float(lc[0]), float(lc[1])
                 row["left_corners"] = ldet[tid].flatten().tolist()
-                t = solvepnp_tag(ldet[tid], tag_size, K)
-                if t is not None:
+                row["image_yaw"] = image_yaw(ldet[tid])   # in-plane yaw (used by IK)
+                pose = solvepnp_pose(ldet[tid], tag_size, K)
+                if pose is not None:
+                    t, rvec = pose
                     row["pnp_left_X"], row["pnp_left_Y"], row["pnp_left_Z"] = map(float, t)
+                    q = rvec_to_quat(rvec)               # full orientation, camera frame
+                    row["pnp_qw"], row["pnp_qx"], row["pnp_qy"], row["pnp_qz"] = map(float, q)
             if tid in rdet:
                 rc = rdet[tid].mean(axis=0)
                 row["right_cx"], row["right_cy"] = float(rc[0]), float(rc[1])
@@ -393,11 +436,24 @@ def row_to_vec(r) -> np.ndarray:
     ], dtype=np.float32)])
 
 
+def row_to_orient_vec(r) -> np.ndarray:
+    """Map one result row to the 6-value ORIENT_FEATURE vector.
+    Missing -> yaw 0, identity quaternion, orient_visible 0."""
+    visible = (r.image_yaw == r.image_yaw)   # left tag seen
+    yaw = r.image_yaw if visible else 0.0
+    have_q = (r.pnp_qw == r.pnp_qw)
+    q = [r.pnp_qw, r.pnp_qx, r.pnp_qy, r.pnp_qz] if have_q else [1.0, 0.0, 0.0, 0.0]
+    return np.array([yaw, *q, 1.0 if visible else 0.0], dtype=np.float32)
+
+
 def bake_into_dataset(dataset: Path, df: pd.DataFrame):
     """Add CUBE_FEATURE column to every data parquet and register it in info.json."""
     posmap = {(int(r.episode_index), int(r.video_frame)): row_to_vec(r)
               for r in df.itertuples(index=False)}
+    orimap = {(int(r.episode_index), int(r.video_frame)): row_to_orient_vec(r)
+              for r in df.itertuples(index=False)}
     zero = np.zeros(len(CUBE_NAMES), dtype=np.float32)
+    zero_ori = np.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)  # identity quat
 
     data_files = sorted(dataset.rglob("data/**/file-*.parquet"))
     if not data_files:
@@ -405,13 +461,14 @@ def bake_into_dataset(dataset: Path, df: pd.DataFrame):
     n_rows = n_filled = 0
     for f in data_files:
         d = pd.read_parquet(f)
-        col = [posmap.get((int(e), int(fi)), zero)
-               for e, fi in zip(d["episode_index"], d["frame_index"])]
+        keys = list(zip(d["episode_index"].astype(int), d["frame_index"].astype(int)))
+        col = [posmap.get(k, zero) for k in keys]
         d[CUBE_FEATURE] = col
+        d[ORIENT_FEATURE] = [orimap.get(k, zero_ori) for k in keys]
         d.to_parquet(f, index=False)
         n_rows += len(d)
         n_filled += sum(1 for v in col if v[12])  # stereo_visible
-    print(f"[bake] wrote {CUBE_FEATURE} to {len(data_files)} data file(s): "
+    print(f"[bake] wrote {CUBE_FEATURE} + {ORIENT_FEATURE} to {len(data_files)} data file(s): "
           f"{n_rows} rows, {n_filled} with a stereo position")
 
     info_path = dataset / "meta" / "info.json"
@@ -419,8 +476,11 @@ def bake_into_dataset(dataset: Path, df: pd.DataFrame):
     info["features"][CUBE_FEATURE] = {
         "dtype": "float32", "shape": [len(CUBE_NAMES)], "names": CUBE_NAMES,
     }
+    info["features"][ORIENT_FEATURE] = {
+        "dtype": "float32", "shape": [len(ORIENT_NAMES)], "names": ORIENT_NAMES,
+    }
     info_path.write_text(json.dumps(info, indent=2))
-    print(f"[bake] registered feature in {info_path}")
+    print(f"[bake] registered features in {info_path}")
 
 
 # --------------------------------------------------------------------------

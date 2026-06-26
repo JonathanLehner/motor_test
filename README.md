@@ -454,9 +454,29 @@ sidecar parquet next to it. The cube/IK/sim features added are:
 | Feature | Shape | Written by | Meaning |
 |---|---|---|---|
 | `observation.cube_position` | `[13]` | `apriltag_cube_pose.py` | stereo XYZ, pnp XYZ, pixel centres, visibility flags (left-eye camera frame) |
-| `observation.arm_qpos_ik` | `[6]` | `ik_track_cube.py` | Nova5 joint angles `joint1..6` (rad) |
+| `observation.cube_orientation` | `[6]` | `apriltag_cube_pose.py` | in-plane image yaw + full tag quaternion (camera frame) + visibility flag |
+| `observation.arm_qpos_ik` | `[6]` | `ik_track_cube.py` | Nova5 joint angles `joint1..6` (rad), incl. wrist yaw aligned to the marker |
 | `observation.ee_pose_target` | `[3]` | `ik_track_cube.py` | the IK target in the robot base frame (m) |
 | `observation.images.sim` | video | `render_sim_video.py` | rendered top-down view of the arm tracking the cube |
+
+### Cube orientation (position vs. angle)
+
+`apriltag_cube_pose.py` computes the **full** tag pose: the per-eye `solvePnP`
+rotation (stored as a quaternion in the camera frame) **and** the in-plane image
+yaw (the tag's rotation in the top-down image plane, robustly read from the tag
+corners). Both go into `observation.cube_orientation`.
+
+The IK uses **only the in-plane yaw**: the gripper is held pointing straight down
+(top-down approach) and its wrist is rotated about the vertical to match the
+marker's yaw, so the fingers align with the cube. Full 6-DOF orientation is
+*calculated and stored* but not driven into the arm — it's noisy on small tags and
+can't be transformed into the robot base frame without calibration. The yaw
+mapping has a sign and offset (`--yaw-sign`, `--yaw-offset`): the default
+`--yaw-sign -1` is calibrated so the rendered gripper rotates *with* the marker
+(the top-down render rotates a world-Z yaw the opposite way in the image, so the
+wrist must negate the tag's image yaw — verified to ~0.6°). The 90° offset choice
+(fingers parallel vs. perpendicular to the tag edge) and any base-frame alignment
+remain arbitrary until real extrinsics exist; use `--yaw-offset` to set it.
 
 ### Two environments
 
@@ -505,10 +525,12 @@ so once Step 4 has run the `observation.images.sim` view appears to the right of
 
 ### Step 3 — Generate the IK trajectory (`ik_track_cube.py`)
 
-Reads the cube sidecar, **interpolates** frames with no detection, **auto-fits**
-the cube positions into the Nova5's reachable workspace, and solves mink IK
-(position target + a downward gripper orientation) per frame, warm-started for a
-smooth trajectory. With `--write-dataset` it bakes `observation.arm_qpos_ik` and
+Reads the cube sidecar, **interpolates** frames with no detection (positions
+linearly, the yaw circularly), **auto-fits** the cube positions into the Nova5's
+reachable workspace, and solves mink IK per frame, warm-started for a smooth
+trajectory. The gripper points straight down with its **wrist yaw aligned to the
+marker's in-plane yaw** (see [Cube orientation](#cube-orientation-position-vs-angle)).
+With `--write-dataset` it bakes `observation.arm_qpos_ik` and
 `observation.ee_pose_target` into the dataset and writes an `ik_track_cube.parquet`
 sidecar.
 
@@ -517,7 +539,8 @@ sidecar.
 ```
 
 Key options: `--orientation-cost` (default `0.5`; keeps the gripper pointing down,
-`0` = free), `--scene`.
+`0` = free), `--yaw-sign` / `--yaw-offset` (map the marker's image yaw to the wrist;
+flip the sign if the wrist rotates the wrong way), `--scene`.
 
 > **Auto-fit is a placeholder, not physically grounded.** There is no
 > camera→robot-base calibration yet, so cube positions are range-mapped into the
