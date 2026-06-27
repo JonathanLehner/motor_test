@@ -495,10 +495,11 @@ uv venv --python 3.12 .venv-ik
 uv pip install --python .venv-ik/bin/python mink mujoco imageio imageio-ffmpeg numpy pandas pyarrow
 ```
 
-The Nova5 model comes from the sibling simulation repo
-(`../capulabs/simulabs-simulation`); `ik_track_cube.py`/`ik_replay.py`/`render_sim_video.py`
-default to its `nova5/scene_single.xml` (a single-arm copy of the bimanual
-`nova5/scene.xml`, created so the viewer shows only the driven arm).
+The Nova5 model is **vendored in this repo** under `nova5_sim/` (scene +
+meshes/textures, ~5.6 MB), so there is no external-repo dependency.
+`ik_track_cube.py` / `ik_replay.py` / `render_sim_video.py` default to
+`nova5_sim/scene_single.xml` — a single-arm scene (so the viewer shows only the
+driven arm), with the table, floor, and a vendored gripper.
 
 ### Step 1 — Detect the cube
 

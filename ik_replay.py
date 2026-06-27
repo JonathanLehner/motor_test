@@ -21,8 +21,7 @@ import mujoco.viewer
 import numpy as np
 import pandas as pd
 
-SIM_REPO = Path("/Users/jonathanlehner/wundercode/robotics/capulabs/simulabs-simulation")
-DEFAULT_SCENE = SIM_REPO / "nova5" / "scene_single.xml"
+DEFAULT_SCENE = Path(__file__).resolve().parent / "nova5_sim" / "scene_single.xml"
 ARM = "left"
 JOINT_COLS = [f"{ARM}_joint{i}" for i in range(1, 7)]   # sidecar column names
 JOINT_NAMES = [f"{ARM}/joint{i}" for i in range(1, 7)]   # model joint names
