@@ -1,0 +1,184 @@
+<mujoco model="nova5_scene_single">
+  <!--
+    Dobot Nova 5 — SINGLE 6-DOF arm (left arm of scene.xml, right arm removed).
+    Created for ik_replay.py so the viewer shows only the arm that is driven.
+    Mesh files: https://github.com/Dobot-Arm/TCP-IP-ROS-6AXis
+  -->
+
+  <compiler angle="radian" meshdir="." texturedir="." autolimits="true"/>
+
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="10">
+    <flag warmstart="enable"/>
+  </option>
+
+  <statistic center="0 -0.1 0.3" extent="0.6" meansize="0.05"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+    <quality shadowsize="8192"/>
+  </visual>
+
+  <default>
+    <joint damping="5.0" frictionloss="0.5"/>
+    <geom friction="1 0.005 0.0001" condim="3" margin="0.001" gap="0.001"/>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="1"/>
+    </default>
+    <default class="collision">
+      <geom group="3" rgba="0 0 0 0"/>
+    </default>
+  </default>
+
+  <asset>
+    <mesh name="nova5_base"  file="meshes/base_link.STL"/>
+    <mesh name="nova5_link1" file="meshes/Link1.STL"/>
+    <mesh name="nova5_link2" file="meshes/Link2.STL"/>
+    <mesh name="nova5_link3" file="meshes/Link3.STL"/>
+    <mesh name="nova5_link4" file="meshes/Link4.STL"/>
+    <mesh name="nova5_link5" file="meshes/Link5.STL"/>
+    <mesh name="nova5_link6" file="meshes/Link6.STL"/>
+    <mesh name="openarm_hand" file="meshes/openarm_hand/hand.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="openarm_finger_l" file="meshes/openarm_hand/finger.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="openarm_finger_r" file="meshes/openarm_hand/finger.stl" scale="0.001 -0.001 0.001"/>
+    <mesh name="d405_solid" file="meshes/d405_solid.stl"/>
+
+    <mesh file="tablelegs.obj"/>
+    <mesh file="tabletop.obj"/>
+
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+             markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <texture type="2d" file="small_meta_table_diffuse.png"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="table" texture="small_meta_table_diffuse"/>
+    <material name="nova5_shell" rgba="0.95 0.96 0.97 1" specular="0.26" shininess="0.22"/>
+    <material name="nova5_shell_alt" rgba="0.90 0.92 0.94 1" specular="0.22" shininess="0.18"/>
+    <material name="nova5_accent_blue" rgba="0.30 0.54 0.84 1" specular="0.32" shininess="0.30"/>
+    <material name="nova5_accent_blue_dark" rgba="0.22 0.42 0.72 1" specular="0.30" shininess="0.28"/>
+    <material name="nova5_flange" rgba="0.70 0.71 0.73 1" specular="0.34" shininess="0.30"/>
+    <material name="openarm_joint_dark" rgba="0.14 0.15 0.17 1" specular="0.22" shininess="0.18"/>
+    <material name="openarm_shell_alt" rgba="0.04 0.05 0.06 1" specular="0.16" shininess="0.12"/>
+    <material name="camera_body"          rgba="0.12 0.12 0.12 1" specular="0.10" shininess="0.08"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 2.5"/>
+
+    <geom name="floor" size="2 2 0.05" type="plane" material="groundplane" pos="0 0 -0.75"/>
+    <geom type="mesh" mesh="tabletop" material="table" class="visual" pos="0 0 -0.75" quat="1 0 0 1"/>
+    <geom type="mesh" mesh="tablelegs" material="table" class="visual" pos="0 0 -0.75" quat="1 0 0 1"/>
+    <geom name="table" pos="0 0 -0.1009" size="0.61 0.37 0.1" type="box" class="collision"
+          rgba="0.5 0.5 0.5 0.1"/>
+
+    <!-- ===================== ARM (left arm of the dual scene) ===================== -->
+    <body name="left_base" pos="-0.469 -0.019 0" quat="0 0 0 1">
+      <inertial pos="0.0000066 0.0000027 0.0698" mass="1.311"
+                fullinertia="0.00308 0.003098 0.002328 -4.04e-8 5.26e-7 -6.37e-9"/>
+      <geom type="mesh" mesh="nova5_base" material="nova5_shell" class="visual"/>
+      <geom type="cylinder" size="0.085 0.075" pos="0 0 0.075" class="collision"/>
+
+      <body name="left/Link1" pos="0 0 0.240">
+        <inertial pos="9.19e-6 -0.02177 -0.02618" mass="1.081"
+                  fullinertia="0.002660 0.002473 0.001647 1.85e-7 -3.28e-7 6.61e-4"/>
+        <joint name="left/joint1" pos="0 0 0" axis="0 0 1"
+               range="-6.28 6.28" damping="2.0" frictionloss="0.2" armature="0.1"/>
+        <geom type="mesh" mesh="nova5_link1" material="nova5_accent_blue_dark" class="visual"/>
+        <geom type="cylinder" size="0.065 0.04" pos="0 0 -0.04" class="collision"/>
+
+        <body name="left/Link2" pos="0 0 0" quat="0.5 0.5 0.5 -0.5">
+          <inertial pos="-0.19934 -0.00696 0.10921" mass="2.546"
+                    fullinertia="0.002852 0.063677 0.064301 -0.002128 -0.001099 -3.84e-5"/>
+          <joint name="left/joint2" pos="0 0 0" axis="0 0 1"
+                 range="-3.14 3.14" damping="2.0" frictionloss="0.2" armature="0.3"/>
+          <geom type="mesh" mesh="nova5_link2" material="nova5_shell" class="visual"/>
+          <geom type="capsule" size="0.055" fromto="0 0 0 -0.3998 -0.01397 0" class="collision"/>
+
+          <body name="left/Link3" pos="-0.3998 -0.01397 0">
+            <inertial pos="-0.15236 -0.00536 0.01990" mass="1.407"
+                      fullinertia="0.001008 0.023174 0.023600 -7.75e-4 4.43e-5 1.31e-6"/>
+            <joint name="left/joint3" pos="0 0 0" axis="0 0 1"
+                   range="-2.79 2.79" damping="2.0" frictionloss="0.2" armature="0.2"/>
+            <geom type="mesh" mesh="nova5_link3" material="nova5_accent_blue" class="visual"/>
+            <geom type="capsule" size="0.05" fromto="0 0 0 -0.3298 -0.01152 0.135" class="collision"/>
+
+            <body name="left/Link4" pos="-0.3298 -0.01152 0.135" quat="0.7071 0 0 -0.7071">
+              <inertial pos="-6.37e-6 -0.02276 -0.02024" mass="0.440"
+                        fullinertia="6.35e-4 4.50e-4 4.80e-4 1.34e-8 2.91e-8 2.11e-4"/>
+              <joint name="left/joint4" pos="0 0 0" axis="0 0 1"
+                     range="-6.28 6.28" damping="1.5" frictionloss="0.2" armature="0.1"/>
+              <geom type="mesh" mesh="nova5_link4" material="nova5_accent_blue" class="visual"/>
+              <geom type="capsule" size="0.045" fromto="0 0 0 0 -0.12 0" class="collision"/>
+
+              <body name="left/Link5" pos="0 -0.12 0" quat="0.7071 0.7071 0 0">
+                <inertial pos="-1.28e-6 0.00191 -0.00761" mass="0.575"
+                          fullinertia="6.63e-4 3.98e-4 6.41e-4 1.30e-8 1.23e-8 -1.20e-4"/>
+                <joint name="left/joint5" pos="0 0 0" axis="0 0 1"
+                       range="-6.28 6.28" damping="1.5" frictionloss="0.2" armature="0.1"/>
+                <geom type="mesh" mesh="nova5_link5" material="nova5_shell" class="visual"/>
+                <geom type="capsule" size="0.04" fromto="0 0 0 0 0.08833 0" class="collision"/>
+
+                <body name="left/Link6" pos="0 0.08833 0" quat="0.7071 -0.7071 0 0">
+                  <inertial pos="1.55e-6 1.52e-4 -0.01946" mass="0.130"
+                            fullinertia="5.03e-5 5.05e-5 7.79e-5 6.27e-11 3.51e-12 5.03e-8"/>
+                  <joint name="left/joint6" pos="0 0 0" axis="0 0 1"
+                         range="-6.28 6.28" damping="1.0" frictionloss="0.1" armature="0.05"/>
+                  <geom type="mesh" mesh="nova5_link6" material="nova5_flange" class="visual"/>
+                  <geom type="cylinder" size="0.04 0.025" pos="0 0 -0.025" class="collision"/>
+                  <body name="left/hand" pos="0 0 0.06">
+                    <geom type="cylinder" size="0.028 0.030" pos="0 0 -0.03" material="openarm_joint_dark" class="visual"/>
+                    <geom type="mesh" mesh="openarm_hand" material="openarm_joint_dark" class="visual" pos="0 0 -0.6585"/>
+                    <geom name="left/d405_vis" type="mesh" mesh="d405_solid"
+                          pos="0.055 0 0"
+                          material="camera_body" contype="0" conaffinity="0" group="1"/>
+                    <camera name="wrist_cam_left"
+                            pos="0.055 0 0" euler="3.14159 0 -1.5708" mode="fixed"
+                            focal="1.93e-3 1.93e-3" resolution="1280 720" sensorsize="3896e-6 2140e-6"/>
+                    <body name="left/left_finger" pos="0 0.006 0.015">
+                      <joint name="left/finger_joint1" type="slide" axis="0 1 0" range="0.0 0.044" damping="2"/>
+                      <geom type="mesh" mesh="openarm_finger_l" material="openarm_shell_alt" class="visual" pos="0 -0.05 -0.673001"/>
+                      <geom type="mesh" mesh="openarm_finger_l" class="collision" pos="0 -0.05 -0.673001"/>
+                    </body>
+                    <body name="left/right_finger" pos="0 -0.006 0.015">
+                      <joint name="left/finger_joint2" type="slide" axis="0 -1 0" range="0.0 0.044" damping="2"/>
+                      <geom type="mesh" mesh="openarm_finger_r" material="openarm_shell_alt" class="visual" pos="0 0.05 -0.673001"/>
+                      <geom type="mesh" mesh="openarm_finger_r" class="collision" pos="0 0.05 -0.673001"/>
+                    </body>
+                  </body>
+                  <site name="left/gripper" pos="0 0 0.06" size="0.01"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- IK mocap target -->
+    <body name="left/target" mocap="true" pos="-0.469 0 0.5">
+      <geom type="box" size="0.02 0.02 0.02" contype="0" conaffinity="0" rgba="1 0 0 0.4"/>
+    </body>
+
+  </worldbody>
+
+  <equality>
+    <joint joint1="left/finger_joint2" joint2="left/finger_joint1" polycoef="0 1 0 0 0"/>
+  </equality>
+
+  <actuator>
+    <position name="left/joint1" joint="left/joint1" ctrlrange="-6.28 6.28" kp="43"  kv="10" forcerange="-35 35"/>
+    <position name="left/joint2" joint="left/joint2" ctrlrange="-3.14 3.14" kp="265" kv="20" forcerange="-144 144"/>
+    <position name="left/joint3" joint="left/joint3" ctrlrange="-2.79 2.79" kp="227" kv="18" forcerange="-59 59"/>
+    <position name="left/joint4" joint="left/joint4" ctrlrange="-6.28 6.28" kp="78"  kv="8"  forcerange="-22 22"/>
+    <position name="left/joint5" joint="left/joint5" ctrlrange="-6.28 6.28" kp="37"  kv="6"  forcerange="-22 22"/>
+    <position name="left/joint6" joint="left/joint6" ctrlrange="-6.28 6.28" kp="10"  kv="2"  forcerange="-10 10"/>
+    <position name="left/gripper" joint="left/finger_joint1" ctrlrange="0.002 0.037" kp="80" kv="8" forcerange="-40 40"/>
+  </actuator>
+
+  <keyframe>
+    <!-- left joint1-6 = 0, finger1, finger2 -->
+    <key name="neutral_pose" qpos="0 0 0 0 0 0 0.03 0.03"/>
+  </keyframe>
+
+</mujoco>
