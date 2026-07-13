@@ -9,3 +9,9 @@
   confirm the resolution actually sticks (watch for `<-- fell back!`). Pick a
   mode the camera advertises (`v4l2-ctl --list-formats-ext` on Linux) and pass
   it via `--width/--height` to `teleop_trigger_record.py`.
+- get the camera intrinsics / calibrate stereo camera
+- [ ] **Replace the IK auto-fit with real camera→base extrinsics.** `ik_track_cube.py`
+  currently range-maps cube positions into the Nova5 workspace (AXIS_MAP / WORKSPACE)
+  because there's no camera→robot transform yet. Once the stereo camera is calibrated
+  and its pose relative to the arm base is known, swap the auto-fit for that transform
+  so the tracked trajectory is physically grounded.

@@ -635,6 +635,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .vid { background: #000; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; position: relative; }
   .vid video { display: block; width: 440px; max-width: 46vw; background: #000; }
   canvas.cubeov { position: absolute; left: 0; top: 0; pointer-events: none; }
+  .vid .dl {
+    position: absolute; top: 6px; right: 6px; z-index: 2;
+    width: 26px; height: 26px; border-radius: 5px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.55); color: var(--ink); text-decoration: none;
+    font-size: 14px; line-height: 1; opacity: 0; transition: opacity .12s;
+  }
+  .vid:hover .dl { opacity: 1; }
+  .vid .dl:hover { background: var(--accent); color: #14171c; }
   .vid .cap { padding: 6px 10px; font-size: 12px; color: var(--mut); border-top: 1px solid var(--line); }
   /* timeline */
   .timeline {
@@ -800,10 +809,12 @@ function show(i) {
   const small = e.frames < SMALL;
   let vids = CAMERAS.map(cam => {
     const seg = e.seg[cam] || [0, 0, 0];
+    const src = `/video?cam=${encodeURIComponent(cam)}&ep=${e.index}`;
+    const fname = `ep${String(e.index).padStart(3,'0')}_${cam}.mp4`;
     return `<div class="vid">
        <video data-from="${seg[0]}" data-to="${seg[1]}" data-fspan="${seg[2]}"
-              src="/video?cam=${encodeURIComponent(cam)}&ep=${e.index}"
-              autoplay muted preload="metadata"></video>
+              src="${src}" autoplay muted preload="metadata"></video>
+       <a class="dl" href="${src}" download="${fname}" title="Download ${fname}">⬇</a>
        <div class="cap">${cam}</div>
      </div>`;
   }).join('');
