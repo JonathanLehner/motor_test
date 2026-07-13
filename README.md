@@ -391,6 +391,24 @@ These errors are commonly related to:
 - unsuitable torque limits
 - commanded positions outside the usable movement range
 
+### "Corrupt JPEG data" during camera recording (USB bandwidth)
+
+When recording with two cameras, warnings like `Corrupt JPEG data: N extraneous bytes before marker 0xdX` or `premature end of data segment` mean the cameras' MJPEG streams are being **truncated because the USB bus is out of bandwidth** — not a bug in the code.
+
+The usual cause is **both cameras sharing one USB 2.0 bus** (480 Mbps), often alongside CAN/serial adapters, Bluetooth and WiFi. Two MJPEG streams do not fit, so frames arrive incomplete.
+
+Check the topology:
+
+```bash
+lsusb -t
+```
+
+Cameras (`Class=Video`) listed under the same `Bus 00x` share bandwidth. Fix, in order of impact:
+
+1. **Move the cameras to USB 3.0 ports (the blue ones).** These are a separate, much faster controller (5–20 Gbps), so each camera gets its own dedicated bandwidth instead of fighting over one USB 2.0 bus. Aim to see the two `Class=Video` entries under a different `Bus` in `lsusb -t`.
+2. If USB 3.0 ports are unavailable, **spread the cameras across different physical USB buses** so they are not on the same hub.
+3. As a last resort, **lower camera resolution/fps** to shrink the MJPEG bandwidth (costs image quality).
+
 ## Notes
 
 These scripts are closer to debugging utilities than a reusable Python package. If this directory is going to be used regularly, the next practical improvement is to replace the hardcoded configuration values with command-line arguments.

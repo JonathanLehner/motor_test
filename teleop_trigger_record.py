@@ -27,7 +27,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
+import glob
 import json
+import os
+import queue
+import re
+import shutil
 import subprocess
 import threading
 import time
@@ -51,6 +57,48 @@ from teleop_trigger import (
     TriggerReader,
     normalize,
 )
+
+# ── Camera auto-detection ────────────────────────────────────────────────────
+
+def find_capture_cameras() -> list[int]:
+    """Return the /dev/videoN indices that are real video-capture nodes.
+
+    Each UVC camera exposes several /dev/video* nodes; only some are capture
+    nodes (the rest are metadata-only and cannot be opened for frames, which is
+    what breaks a hardcoded index list after the cameras are replugged). This
+    queries each node's V4L2 capabilities and keeps the first capture node per
+    physical camera (grouped by bus_info), sorted by index.
+    """
+    V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+    V4L2_CAP_DEVICE_CAPS = 0x80000000
+    # VIDIOC_QUERYCAP = _IOR('V', 0, struct v4l2_capability) — struct is 104 bytes
+    VIDIOC_QUERYCAP = (2 << 30) | (104 << 16) | (ord("V") << 8) | 0
+
+    first_per_bus: dict[bytes, int] = {}
+    nodes = sorted(glob.glob("/dev/video*"),
+                   key=lambda p: int(re.search(r"\d+", p).group()))
+    for path in nodes:
+        idx = int(re.search(r"\d+", path).group())
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            buf = bytearray(104)
+            fcntl.ioctl(fd, VIDIOC_QUERYCAP, buf, True)
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+        caps = int.from_bytes(buf[84:88], "little")
+        device_caps = int.from_bytes(buf[88:92], "little")
+        effective = device_caps if (caps & V4L2_CAP_DEVICE_CAPS) else caps
+        if not (effective & V4L2_CAP_VIDEO_CAPTURE):
+            continue  # metadata-only node
+        bus = bytes(buf[48:80]).split(b"\x00", 1)[0]
+        first_per_bus.setdefault(bus, idx)
+    return sorted(first_per_bus.values())
+
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 
@@ -159,6 +207,7 @@ class CameraCapture:
         self._lock     = threading.Lock()
         self._latest: Optional[Frame] = None
         self._running  = False
+        self._recorder = None      # active _StreamingEpisode, or None when idle
         self._caps: list[cv2.VideoCapture] = []
 
         actual: list[tuple[int, int]] = []
@@ -204,6 +253,10 @@ class CameraCapture:
         with self._lock:
             return self._latest
 
+    def set_recorder(self, recorder) -> None:
+        """Route every captured frame to this episode (None to stop recording)."""
+        self._recorder = recorder
+
     def _run(self) -> None:
         next_tick = time.perf_counter()
         while self._running:
@@ -220,16 +273,20 @@ class CameraCapture:
                 if not ret:
                     ok = False
                     break
-                images.append(frame)
+                # OpenCV reuses the capture buffer on the next read(); copy so a
+                # recorded frame can't be overwritten mid-encode (frame tearing).
+                images.append(frame.copy())
 
             if ok:
                 action = self._trigger.latest_action() if self._trigger else 0.0
+                frame  = Frame(timestamp=time.time(), images=images, action=action)
+                # Feed the recorder straight from the capture thread so a slow
+                # display loop can never drop recorded frames.
+                recorder = self._recorder
+                if recorder is not None:
+                    recorder.add(frame)
                 with self._lock:
-                    self._latest = Frame(
-                        timestamp=time.time(),
-                        images=images,
-                        action=action,
-                    )
+                    self._latest = frame
 
 
 # ── ffmpeg-backed video encoder ────────────────────────────────────────────────
@@ -265,28 +322,82 @@ class VideoWriter:
         self._proc.wait()
 
 
-# ── Episode accumulator ────────────────────────────────────────────────────────
+# ── Streaming episode recorder ──────────────────────────────────────────────────
 
-class EpisodeBuffer:
-    def __init__(self) -> None:
-        self._frames: list[Frame] = []
-        self._lock       = threading.Lock()
-        self._start_time = time.time()
+class _StreamingEpisode:
+    """One recording in flight: frames are encoded to disk as they arrive.
 
+    A dedicated writer thread pulls frames off a bounded queue and pipes them
+    straight to ffmpeg, so only tiny per-frame metadata (timestamp, action) is
+    kept in RAM — recording is O(1) in memory regardless of episode length.
+    Videos stream to a temp dir and are moved into place at finalize, once the
+    episode index is known. If the encoder can't keep up the queue fills and
+    frames are counted as dropped rather than ballooning memory.
+    """
+
+    def __init__(self, dataset: "LeRobotDatasetWriter", uid: int) -> None:
+        self._ds  = dataset
+        self._tmp = dataset.root / "videos" / ".pending" / f"ep_{uid:06d}"
+        self._tmp.mkdir(parents=True, exist_ok=True)
+        self._writers = [
+            VideoWriter(self._tmp / f"cam_{i}.mp4",
+                        dataset.width, dataset.height, dataset.fps)
+            for i in range(len(dataset.cam_keys))
+        ]
+        self._meta: list[tuple[float, float]] = []   # (timestamp, action) per frame
+        self._queue: "queue.Queue[Optional[Frame]]" = queue.Queue(
+            maxsize=dataset.fps * 4)
+        self._closing  = False
+        self._enqueued = 0
+        self._dropped  = 0
+        self._start    = time.time()
+        self._thread   = threading.Thread(target=self._consume, daemon=True,
+                                          name="rec-writer")
+        self._thread.start()
+
+    # producer side — called from the capture thread ────────────────────────────
     def add(self, frame: Frame) -> None:
-        with self._lock:
-            self._frames.append(frame)
+        if self._closing:
+            return
+        try:
+            self._queue.put_nowait(frame)
+            self._enqueued += 1
+        except queue.Full:
+            self._dropped += 1
 
     @property
     def count(self) -> int:
-        with self._lock:
-            return len(self._frames)
+        return self._enqueued
 
-    def drain(self) -> tuple[list[Frame], float]:
-        with self._lock:
-            frames = list(self._frames)
-            self._frames.clear()
-        return frames, time.time() - self._start_time
+    # consumer side — the writer thread ─────────────────────────────────────────
+    def _consume(self) -> None:
+        while True:
+            frame = self._queue.get()
+            if frame is None:
+                return
+            for w, img in zip(self._writers, frame.images):
+                w.write(img)
+            self._meta.append((frame.timestamp, frame.action))
+
+    def _drain(self) -> None:
+        self._closing = True
+        self._queue.put(None)          # sentinel: stop the writer thread
+        self._thread.join()
+        for w in self._writers:
+            w.close()                  # flush + finalize each mp4
+
+    # lifecycle ──────────────────────────────────────────────────────────────────
+    def finalize(self) -> None:
+        """Drain the encoder, then write parquet + move videos into the dataset."""
+        self._drain()
+        self._ds._commit_episode(self._meta, self._tmp,
+                                 time.time() - self._start, self._dropped)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def discard(self) -> None:
+        self._drain()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        print("[rec] Discarded episode")
 
 
 # ── LeRobot v3 dataset writer ──────────────────────────────────────────────────
@@ -318,6 +429,8 @@ class LeRobotDatasetWriter:
         self.total_episodes = 0
         self.total_frames   = 0
         self._episodes_meta: list[dict] = []
+        self._lock          = threading.Lock()   # serializes commit + uid alloc
+        self._next_uid      = 0
 
         for sub in ("meta", "data", "videos"):
             (root / sub).mkdir(parents=True, exist_ok=True)
@@ -328,57 +441,71 @@ class LeRobotDatasetWriter:
                 json.dump({"task_index": 0, "task": task}, f)
                 f.write("\n")
 
-    def save_episode(self, frames: list[Frame], duration: float) -> None:
-        if not frames:
+    def begin_episode(self) -> "_StreamingEpisode":
+        """Open a new streaming episode; feed it frames, then finalize/discard."""
+        with self._lock:
+            uid = self._next_uid
+            self._next_uid += 1
+        return _StreamingEpisode(self, uid)
+
+    def _commit_episode(self, meta: list[tuple[float, float]], tmp_dir: Path,
+                        duration: float, dropped: int) -> None:
+        """Write the parquet and move the streamed videos into the dataset.
+
+        Called from the episode's finalize thread. The video is already encoded;
+        this only writes metadata and renames files, so the lock is held briefly.
+        """
+        if not meta:
             print("[dataset] Episode discarded (no frames)")
             return
 
-        ep_idx = self.total_episodes
-        chunk  = ep_idx // self.chunks_size
-        n      = len(frames)
-        t0     = frames[0].timestamp
+        with self._lock:
+            ep_idx = self.total_episodes
+            chunk  = ep_idx // self.chunks_size
+            n      = len(meta)
+            t0     = meta[0][0]
+            base   = self.total_frames
 
-        # ── Parquet ────────────────────────────────────────────────────────────
-        parquet_dir = self.root / "data" / f"chunk-{chunk:03d}"
-        parquet_dir.mkdir(parents=True, exist_ok=True)
+            # ── Parquet ─────────────────────────────────────────────────────────
+            parquet_dir = self.root / "data" / f"chunk-{chunk:03d}"
+            parquet_dir.mkdir(parents=True, exist_ok=True)
 
-        cols: dict = {
-            "timestamp":     pa.array([f.timestamp - t0 for f in frames], pa.float32()),
-            "frame_index":   pa.array(range(n),                           pa.int64()),
-            "episode_index": pa.array([ep_idx] * n,                       pa.int64()),
-            "index":         pa.array(range(self.total_frames,
-                                            self.total_frames + n),        pa.int64()),
-            "task_index":    pa.array([0] * n,                            pa.int64()),
-            "next.done":     pa.array([False] * (n - 1) + [True],         pa.bool_()),
-        }
-        if self.has_trigger:
-            cols["action"] = pa.array(
-                [[f.action] for f in frames],
-                pa.list_(pa.float32()),
-            )
+            cols: dict = {
+                "timestamp":     pa.array([ts - t0 for ts, _ in meta], pa.float32()),
+                "frame_index":   pa.array(range(n),                    pa.int64()),
+                "episode_index": pa.array([ep_idx] * n,                pa.int64()),
+                "index":         pa.array(range(base, base + n),       pa.int64()),
+                "task_index":    pa.array([0] * n,                     pa.int64()),
+                "next.done":     pa.array([False] * (n - 1) + [True],  pa.bool_()),
+            }
+            if self.has_trigger:
+                cols["action"] = pa.array(
+                    [[a] for _, a in meta],
+                    pa.list_(pa.float32()),
+                )
 
-        pq.write_table(pa.table(cols),
-                       parquet_dir / f"episode_{ep_idx:06d}.parquet")
+            pq.write_table(pa.table(cols),
+                           parquet_dir / f"episode_{ep_idx:06d}.parquet")
 
-        # ── Videos ────────────────────────────────────────────────────────────
-        for cam_idx, cam_key in enumerate(self.cam_keys):
-            vid_dir  = self.root / "videos" / f"chunk-{chunk:03d}" / cam_key
-            vid_path = vid_dir / f"episode_{ep_idx:06d}.mp4"
-            writer   = VideoWriter(vid_path, self.width, self.height, self.fps)
-            for f in frames:
-                writer.write(f.images[cam_idx])
-            writer.close()
+            # ── Videos: move the streamed temp files into place ──────────────────
+            for cam_idx, cam_key in enumerate(self.cam_keys):
+                vid_dir = self.root / "videos" / f"chunk-{chunk:03d}" / cam_key
+                vid_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / f"cam_{cam_idx}.mp4").replace(
+                    vid_dir / f"episode_{ep_idx:06d}.mp4")
 
-        # ── Metadata ──────────────────────────────────────────────────────────
-        self._episodes_meta.append({
-            "episode_index": ep_idx,
-            "tasks":  [self.task],
-            "length": n,
-        })
-        self.total_frames   += n
-        self.total_episodes += 1
-        self._flush_meta()
-        print(f"[dataset] Saved episode {ep_idx}  ({n} frames  {duration:.1f}s)")
+            # ── Metadata ─────────────────────────────────────────────────────────
+            self._episodes_meta.append({
+                "episode_index": ep_idx,
+                "tasks":  [self.task],
+                "length": n,
+            })
+            self.total_frames   += n
+            self.total_episodes += 1
+            self._flush_meta()
+
+        warn = f"  [!] {dropped} frames DROPPED (encoder too slow)" if dropped else ""
+        print(f"[dataset] Saved episode {ep_idx}  ({n} frames  {duration:.1f}s){warn}")
 
     def _flush_meta(self) -> None:
         ep_path = self.root / "meta" / "episodes.jsonl"
@@ -503,6 +630,7 @@ def run(
     output: Path,
     task: str,
     trigger_thread: Optional[TriggerGripperThread],
+    view_width: int = 0,
 ) -> None:
     cam_keys    = [f"observation.images.cam_{i}" for i in range(len(cam_ids))]
     has_trigger = trigger_thread is not None
@@ -525,38 +653,37 @@ def run(
     print(f"Display → {'window' if has_display else 'headless (keyboard via terminal)'}")
     print("Controls: [R] record  [S] stop/save  [D] discard  [Q] quit")
 
-    episode:        Optional[EpisodeBuffer] = None
-    last_frame_ts:  float = 0.0
+    episode:        Optional[_StreamingEpisode] = None
     saving_threads: list[threading.Thread] = []
 
     def _handle_key(key: int) -> bool:
-        nonlocal episode, last_frame_ts
+        nonlocal episode
         if key == ord('q'):
             return True
         elif key == ord('r'):
             if episode is None:
-                episode       = EpisodeBuffer()
-                last_frame_ts = 0.0
+                episode = dataset.begin_episode()
+                capture.set_recorder(episode)
                 print(f"[rec] Started episode {dataset.total_episodes}")
             else:
                 print("[rec] Already recording — press S to stop first")
         elif key == ord('s'):
             if episode is not None:
-                buf            = episode
-                episode        = None
-                frames, dur    = buf.drain()
-                print(f"[rec] Saving {len(frames)} frames in background…")
-                t = threading.Thread(target=dataset.save_episode,
-                                     args=(frames, dur), daemon=False)
+                buf     = episode
+                episode = None
+                capture.set_recorder(None)
+                print(f"[rec] Saving {buf.count} frames in background…")
+                t = threading.Thread(target=buf.finalize, daemon=False)
                 t.start()
                 saving_threads.append(t)
             else:
                 print("[rec] Not recording")
         elif key == ord('d'):
             if episode is not None:
-                n       = episode.count
+                buf     = episode
                 episode = None
-                print(f"[rec] Discarded {n} frames")
+                capture.set_recorder(None)
+                buf.discard()
             else:
                 print("[rec] Not recording")
         return False
@@ -568,10 +695,8 @@ def run(
                 time.sleep(0.005)
                 continue
 
-            if episode is not None and frame.timestamp > last_frame_ts:
-                episode.add(frame)
-                last_frame_ts = frame.timestamp
-
+            # Recording is fed by the capture thread (see CameraCapture._run);
+            # this loop only drives the preview + keyboard.
             if has_display:
                 rec       = episode is not None
                 annotated = [
@@ -585,7 +710,15 @@ def run(
                     dataset.total_episodes,
                     frame.action,
                 )
-                cv2.imshow("Stereo Cameras", np.vstack([combined, status_bar]))
+                display = np.vstack([combined, status_bar])
+                # Recorded frames are full-res; only the live preview is scaled
+                # down so the wide stereo image fits on screen.
+                if view_width and display.shape[1] > view_width:
+                    scale  = view_width / display.shape[1]
+                    display = cv2.resize(
+                        display, (view_width, int(display.shape[0] * scale)),
+                        interpolation=cv2.INTER_AREA)
+                cv2.imshow("Stereo Cameras", display)
                 raw_key = cv2.waitKey(1) & 0xFF
                 if raw_key != 255 and _handle_key(raw_key):
                     break
@@ -599,10 +732,9 @@ def run(
 
     finally:
         if episode is not None:
-            frames, dur = episode.drain()
-            if frames:
-                print(f"[rec] Auto-saving open episode ({len(frames)} frames)…")
-                dataset.save_episode(frames, dur)
+            capture.set_recorder(None)
+            print(f"[rec] Auto-saving open episode ({episode.count} frames)…")
+            episode.finalize()
 
         for t in saving_threads:
             t.join()
@@ -628,11 +760,16 @@ def main() -> None:
     )
 
     # Camera
-    p.add_argument("--cam-ids", type=int, nargs=2, default=DEFAULT_CAM_IDS,
-                   metavar=("LEFT", "RIGHT"))
+    p.add_argument("--cam-ids", type=int, nargs=2, default=None,
+                   metavar=("LEFT", "RIGHT"),
+                   help="Camera capture indices. Omit to auto-detect the "
+                        "capture nodes (skips metadata nodes).")
     p.add_argument("--fps",    type=int,  default=DEFAULT_FPS)
     p.add_argument("--width",  type=int,  default=DEFAULT_WIDTH)
     p.add_argument("--height", type=int,  default=DEFAULT_HEIGHT)
+    p.add_argument("--view-width", type=int, default=1280,
+                   help="Scale the live preview down to this width so it fits "
+                        "the screen (recording stays full-res). 0 disables.")
     p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("--task",   type=str,  default=DEFAULT_TASK)
 
@@ -666,6 +803,15 @@ def main() -> None:
     p.add_argument("--dm-mit-rate",     type=float)
 
     args = p.parse_args()
+
+    # ── Resolve cameras ────────────────────────────────────────────────────────
+    if args.cam_ids is None:
+        found = find_capture_cameras()
+        if len(found) < 2:
+            p.error(f"auto-detected capture cameras {found}, need 2. "
+                    f"Check `v4l2-ctl --list-devices` and pass --cam-ids explicitly.")
+        args.cam_ids = found[:2]
+        print(f"[auto] detected capture cameras: {found} -> using {args.cam_ids}")
 
     # ── Build trigger thread (unless --no-trigger) ─────────────────────────────
     trigger_thread: Optional[TriggerGripperThread] = None
@@ -709,6 +855,7 @@ def main() -> None:
         output=args.output,
         task=args.task,
         trigger_thread=trigger_thread,
+        view_width=args.view_width,
     )
 
 
