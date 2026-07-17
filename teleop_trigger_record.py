@@ -54,7 +54,7 @@ from teleop_trigger import (
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 
-DEFAULT_CAM_IDS = [0, 2]
+DEFAULT_CAM_IDS = [0, 1]
 DEFAULT_FPS     = 30
 # These cameras are side-by-side stereo: the resolution is the COMBINED frame
 # (both eyes share the width), so valid modes are double-width like 2560x720
@@ -147,39 +147,104 @@ class TriggerGripperThread:
                 time.sleep(period - elapsed)
 
 
+# ── Camera sources (OpenCV UVC or Intel RealSense) ──────────────────────────────
+
+def _parse_cam_spec(spec) -> tuple[str, object]:
+    """('cv2', index:int) for a plain index, ('rs', serial:str|None) for RealSense.
+
+    RealSense specs: 'rs' / 'realsense' (first device) or 'rs:SERIAL'.
+    """
+    s = str(spec).strip()
+    if s.isdigit():
+        return ("cv2", int(s))
+    low = s.lower()
+    if low in ("rs", "realsense"):
+        return ("rs", None)
+    if low.startswith("rs:") or low.startswith("realsense:"):
+        return ("rs", s.split(":", 1)[1])
+    raise ValueError(f"unknown camera spec {spec!r}; use an int index or 'rs[:serial]'")
+
+
+class _CV2Source:
+    def __init__(self, index: int, width: int, height: int, fps: int) -> None:
+        self._cap = cv2.VideoCapture(index)
+        # MJPG unlocks the high-res side-by-side modes on USB stereo cameras;
+        # without it many are stuck in a low-res uncompressed (YUYV) mode.
+        self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self._cap.set(cv2.CAP_PROP_FPS, fps)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"Cannot open camera {index}")
+
+    def size(self) -> tuple[int, int]:
+        return (int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+    def read(self):
+        return self._cap.read()
+
+    def release(self) -> None:
+        self._cap.release()
+
+
+class _RealSenseSource:
+    def __init__(self, serial: str | None, width: int, height: int, fps: int) -> None:
+        import pyrealsense2 as rs  # lazy: only needed when an 'rs' spec is used
+        self._pipe = rs.pipeline()
+        cfg = rs.config()
+        if serial:
+            cfg.enable_device(serial)
+        cfg.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
+        profile = self._pipe.start(cfg)
+        vs = profile.get_stream(rs.stream.color).as_video_stream_profile()
+        self._size = (vs.width(), vs.height())
+
+    def size(self) -> tuple[int, int]:
+        return self._size
+
+    def read(self):
+        frames = self._pipe.wait_for_frames()
+        color = frames.get_color_frame()
+        if not color:
+            return False, None
+        return True, np.asanyarray(color.get_data())
+
+    def release(self) -> None:
+        self._pipe.stop()
+
+
+def _open_source(spec, width: int, height: int, fps: int):
+    kind, arg = _parse_cam_spec(spec)
+    if kind == "cv2":
+        return _CV2Source(arg, width, height, fps)
+    return _RealSenseSource(arg, width, height, fps)
+
+
 # ── Camera capture thread ──────────────────────────────────────────────────────
 
 class CameraCapture:
     """Reads all cameras in a background thread; snapshots trigger action per frame."""
 
-    def __init__(self, cam_ids: list[int], fps: int, width: int, height: int,
+    def __init__(self, cam_ids: list, fps: int, width: int, height: int,
                  trigger: Optional[TriggerGripperThread] = None) -> None:
         self._interval = 1.0 / fps
         self._trigger  = trigger
         self._lock     = threading.Lock()
         self._latest: Optional[Frame] = None
         self._running  = False
-        self._caps: list[cv2.VideoCapture] = []
+        self._caps: list = []
 
         actual: list[tuple[int, int]] = []
         for cid in cam_ids:
-            cap = cv2.VideoCapture(cid)
-            # MJPG unlocks the high-res side-by-side modes on USB stereo cameras;
-            # without it many are stuck in a low-res uncompressed (YUYV) mode.
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            cap.set(cv2.CAP_PROP_FPS, fps)
-            if not cap.isOpened():
-                raise RuntimeError(f"Cannot open camera {cid}")
-            aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            src = _open_source(cid, width, height, fps)
+            aw, ah = src.size()
             actual.append((aw, ah))
             if (aw, ah) != (width, height):
                 print(f"[warn] camera {cid}: requested {width}x{height} but got {aw}x{ah} — "
                       f"camera fell back to a supported mode. Set --width/--height to a "
                       f"resolution it advertises (stereo modes are side-by-side, e.g. 2560x720).")
-            self._caps.append(cap)
+            self._caps.append(src)
 
         # The writer and dataset metadata use a single resolution, so all cameras
         # must agree. Use what the cameras ACTUALLY deliver, not what was requested.
@@ -496,7 +561,7 @@ def _stdin_key() -> Optional[int]:
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
 def run(
-    cam_ids: list[int],
+    cam_ids: list,
     fps: int,
     width: int,
     height: int,
@@ -628,8 +693,10 @@ def main() -> None:
     )
 
     # Camera
-    p.add_argument("--cam-ids", type=int, nargs=2, default=DEFAULT_CAM_IDS,
-                   metavar=("LEFT", "RIGHT"))
+    p.add_argument("--cam-ids", type=str, nargs=2, default=DEFAULT_CAM_IDS,
+                   metavar=("LEFT", "RIGHT"),
+                   help="Camera specs: int index (OpenCV/UVC) or 'rs[:serial]' "
+                        "(Intel RealSense). Default: %(default)s")
     p.add_argument("--fps",    type=int,  default=DEFAULT_FPS)
     p.add_argument("--width",  type=int,  default=DEFAULT_WIDTH)
     p.add_argument("--height", type=int,  default=DEFAULT_HEIGHT)
