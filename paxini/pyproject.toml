@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paxini-s1813-sdk"
+version = "0.1.0"
+description = "Python SDK, CLI, and local dashboard for PaXini DP-S1813-Elite"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["pyserial>=3.5"]
+
+[project.scripts]
+paxini-read = "read_s1813_elite:main"
+paxini-ui = "s1813_ui:main"
+
+[tool.setuptools]
+packages = ["paxini_sdk", "paxini_ui"]
+py-modules = ["read_s1813_elite", "s1813_ui"]
+
+[tool.setuptools.package-data]
+paxini_ui = ["*.html", "*.css", "*.js"]

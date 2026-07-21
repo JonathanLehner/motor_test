@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-07-14T19:46:27+02:00",
+  "port": "/dev/ttyACM0",
+  "baud": 921600,
+  "can_id": 1,
+  "motor_type": "DM4310",
+  "samples": 293,
+  "position_min_rad": 1.1942092011902048,
+  "position_max_rad": 2.4835965514610514,
+  "position_span_rad": 1.2893873502708466,
+  "position_min_deg": 68.42314708388814,
+  "position_max_deg": 142.299600411964,
+  "position_span_deg": 73.87645332807587
+}

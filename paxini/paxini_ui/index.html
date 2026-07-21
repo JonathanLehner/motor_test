@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PaXini S1813-Elite Tactile Array</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">PAXINI · PX-6AX GEN3</div>
+        <h1>S1813‑Elite Tactile Array</h1>
+      </div>
+      <div id="status" class="status waiting"><span></span><b>Waiting for data</b></div>
+    </header>
+
+    <section class="dashboard">
+      <article class="panel map-panel">
+        <div class="panel-head">
+          <div>
+            <div class="label">DISTRIBUTED FORCE</div>
+            <h2>31-point surface force</h2>
+          </div>
+          <div class="legend"><span>0 N</span><i></i><span>25 N</span></div>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="force-map"></canvas>
+          <div id="tooltip" class="tooltip"></div>
+          <div class="axis axis-x">+X</div>
+          <div class="axis axis-y">+Y</div>
+        </div>
+        <div class="map-note">Color and size show Fz · Arrows show Fx / Fy · Hover for point details</div>
+      </article>
+
+      <aside class="side">
+        <article class="panel total-panel">
+          <div class="label">RESULTANT FORCE</div>
+          <h2>Three-axis resultant</h2>
+          <div class="force-grid">
+            <div><span>Fx</span><strong id="total-fx">—</strong><small>N</small></div>
+            <div><span>Fy</span><strong id="total-fy">—</strong><small>N</small></div>
+            <div class="normal"><span>Fz</span><strong id="total-fz">—</strong><small>N</small></div>
+          </div>
+          <div class="magnitude"><span>Force magnitude</span><b id="total-mag">— N</b></div>
+        </article>
+
+        <article class="panel meta-panel">
+          <div class="label">CONNECTION</div>
+          <dl>
+            <div><dt>Serial port</dt><dd id="port">—</dd></div>
+            <div><dt>Device address</dt><dd id="address">—</dd></div>
+            <div><dt>Sensor polling</dt><dd id="rate">—</dd></div>
+            <div><dt>Rated output</dt><dd>83.3 Hz</dd></div>
+            <div><dt>Sample count</dt><dd id="count">—</dd></div>
+          </dl>
+        </article>
+
+        <article class="panel ranking-panel">
+          <div class="label">HOT SPOTS</div>
+          <h2>Normal-force hot spots</h2>
+          <ol id="ranking"></ol>
+        </article>
+      </aside>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
