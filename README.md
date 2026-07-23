@@ -69,6 +69,12 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
 - Python 3.10 or newer
 - A connected serial device
 - A powered Feetech motor / Waveshare controller board
+- **ffmpeg** on `PATH` — `teleop_trigger_record.py` shells out to it to encode
+  the camera videos. It is a system binary, not a pip package:
+  - macOS: `brew install ffmpeg`
+  - Debian/Ubuntu: `sudo apt install ffmpeg`
+- **pyrealsense2** (optional) — only for Intel RealSense cameras
+  (`--cam-ids rs`), which also record 16-bit depth PNGs: `pip install pyrealsense2`
 
 ### SDK note: feetech-servo-sdk vs ftservo-python-sdk (conflict)
 
@@ -438,6 +444,55 @@ from an assumed per-eye horizontal FOV (`--hfov`) and the baseline is a guess
 calibration, pass `--calib calib.json` with any of `{fx, fy, cx, cy, baseline}`
 to override the estimate — nothing else changes.
 
+### Stereo camera calibration (`stereo_charuco_calibrate.py`)
+
+Use ChArUco calibration for the side-by-side stereo cameras. The script generates
+the printable board, captures combined stereo frames, splits each frame into
+left/right eyes, calibrates both eyes plus the stereo baseline, and writes a JSON
+that `apriltag_cube_pose.py --calib` can read.
+
+The matching default board is checked into the repo as the **A4 portrait** PDF
+`charuco_board_6x8_30mm.pdf`. Print it at **actual size / 100% scale**; the outer
+board must measure **180.0 mm wide x 240.0 mm tall**. The sidecar
+`charuco_board_6x8_30mm.json` records the exact board parameters.
+
+```bash
+# Regenerate the printable board if needed
+.venv/bin/python stereo_charuco_calibrate.py make-board
+
+# Capture calibration images at the same mode used for recording
+.venv/bin/python stereo_charuco_calibrate.py capture \
+  --camera 0 \
+  --width 2560 \
+  --height 720 \
+  --output-dir calibration_frames
+
+# Or auto-save good frames when both eyes detect the board
+.venv/bin/python stereo_charuco_calibrate.py capture \
+  --camera 0 \
+  --width 2560 \
+  --height 720 \
+  --auto \
+  --count 35
+
+# Calibrate and write the JSON consumed by apriltag_cube_pose.py
+.venv/bin/python stereo_charuco_calibrate.py calibrate \
+  --frames calibration_frames \
+  --output stereo_calib.json
+
+# Use the real intrinsics/baseline for AprilTag cube pose estimation
+.venv/bin/python apriltag_cube_pose.py \
+  --dataset lerobot_dataset_grasp \
+  --calib stereo_calib.json \
+  --tag-id 0 \
+  --write-dataset
+```
+
+For good calibration data, collect at least 20-40 sharp frames with the board at
+different positions, tilts, and distances. Keep the full board or most of it
+visible in both eyes; avoid motion blur and glare. Use the same camera resolution
+for calibration and for later dataset recording.
+
 ## Dataset → IK → simulation pipeline
 
 This pipeline turns a recorded teleop dataset into training data augmented with a
@@ -654,6 +709,24 @@ These errors are commonly related to:
 - too much mechanical resistance in the gripper
 - unsuitable torque limits
 - commanded positions outside the usable movement range
+
+### "Corrupt JPEG data" during camera recording (USB bandwidth)
+
+When recording with two cameras, warnings like `Corrupt JPEG data: N extraneous bytes before marker 0xdX` or `premature end of data segment` mean the cameras' MJPEG streams are being **truncated because the USB bus is out of bandwidth** — not a bug in the code.
+
+The usual cause is **both cameras sharing one USB 2.0 bus** (480 Mbps), often alongside CAN/serial adapters, Bluetooth and WiFi. Two MJPEG streams do not fit, so frames arrive incomplete.
+
+Check the topology:
+
+```bash
+lsusb -t
+```
+
+Cameras (`Class=Video`) listed under the same `Bus 00x` share bandwidth. Fix, in order of impact:
+
+1. **Move the cameras to USB 3.0 ports (the blue ones).** These are a separate, much faster controller (5–20 Gbps), so each camera gets its own dedicated bandwidth instead of fighting over one USB 2.0 bus. Aim to see the two `Class=Video` entries under a different `Bus` in `lsusb -t`.
+2. If USB 3.0 ports are unavailable, **spread the cameras across different physical USB buses** so they are not on the same hub.
+3. As a last resort, **lower camera resolution/fps** to shrink the MJPEG bandwidth (costs image quality).
 
 ## Notes
 

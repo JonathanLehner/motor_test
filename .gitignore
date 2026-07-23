@@ -1,5 +1,24 @@
-lerobot_dataset
-lerobot_dataset_clean
-*.pyc
-.venv/
+# macOS
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+.venv-ik/
+
+# Local LeRobot datasets and captures
+/lerobot_dataset/
+/lerobot_dataset_*/
+/lerobot_dataset_*.zip
+/calibration_frames/
+/stereo_calib*.json
+
+# Generated experiment outputs
+/detection_test/output/
+
+# Optional board preview fallback; the checked-in calibration board is the PDF.
+/charuco_board_*.png
